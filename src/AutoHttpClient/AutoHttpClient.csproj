@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <NoWarn>$(NoWarn);NU5017;NU5128;RS2008</NoWarn>
+
+    <PackageId>AutoHttpClient.Generator</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Justin Bannister</Authors>
+    <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
+    <Description>Compile-time typed HTTP client generation for .NET using Roslyn source generators. Add [HttpClient] to an interface and [Get]/[Post]/[Put]/[Delete]/[Patch] to methods — AutoHttpClient generates a strongly-typed HttpClient implementation at build time. AOT-safe Refit alternative. Zero reflection, zero runtime overhead.</Description>
+    <PackageTags>httpclient;rest;api-client;source-generator;roslyn;dotnet;aspnetcore;csharp;compile-time;zero-reflection;aot;refit-alternative;typed-httpclient;maui;openapi</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/Swevo/AutoHttpClient.Generator</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Swevo/AutoHttpClient.Generator</PackageProjectUrl>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageIcon>icon.png</PackageIcon>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>false</IncludeSymbols>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <PackageReleaseNotes>1.0.0: [HttpClient] on interface; [Get]/[Post]/[Put]/[Delete]/[Patch] methods; [Body]/[Query]/[Header] parameters; route template interpolation; AddAutoHttpClients() DI registration; AH001/AH002/AH003 diagnostics.</PackageReleaseNotes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.*" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.*" PrivateAssets="all">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.*" PrivateAssets="all">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="$(OutputPath)$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="build\AutoHttpClient.props" Pack="true" PackagePath="build\" />
+    <None Include="build\AutoHttpClient.Generator.props" Pack="true" PackagePath="build\" />
+    <None Include="build\AutoHttpClient.Generator.targets" Pack="true" PackagePath="build\" />
+  </ItemGroup>
+</Project>

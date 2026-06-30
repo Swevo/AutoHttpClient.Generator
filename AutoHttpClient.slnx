@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/AutoHttpClient/AutoHttpClient.csproj" />
+  <Project Path="tests/AutoHttpClient.Tests/AutoHttpClient.Tests.csproj" />
+</Solution>
