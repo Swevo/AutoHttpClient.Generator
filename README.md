@@ -164,17 +164,104 @@ The package emits these attributes at post-initialization time:
 - `QueryAttribute`
 - `HeaderAttribute`
 
+## Migrating from Refit
+
+AutoHttpClient.Generator uses the same interface-first approach as Refit. Migration is mostly a find-and-replace of attributes.
+
+### 1. Install and remove Refit
+
+```bash
+dotnet add package AutoHttpClient.Generator
+dotnet remove package Refit
+dotnet remove package Refit.HttpClientFactory
+```
+
+### 2. Replace Refit attributes with AutoHttpClient attributes
+
+```csharp
+// Before (Refit)
+using Refit;
+
+public interface IOrdersApi
+{
+    [Get("/api/orders/{id}")]
+    Task<Order?> GetOrderAsync(int id, CancellationToken ct = default);
+
+    [Post("/api/orders")]
+    Task<Order> CreateOrderAsync([Body] CreateOrderRequest request, CancellationToken ct = default);
+
+    [Get("/api/orders")]
+    Task<List<Order>> GetOrdersAsync([AliasAs("status")] string? status = null);
+}
+
+// After (AutoHttpClient.Generator)
+using AutoHttpClient;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get("/api/orders/{id}")]
+    Task<Order?> GetOrderAsync(int id, CancellationToken ct = default);
+
+    [Post("/api/orders")]
+    Task<Order> CreateOrderAsync([Body] CreateOrderRequest request, CancellationToken ct = default);
+
+    [Get("/api/orders")]
+    Task<List<Order>> GetOrdersAsync([Query("status")] string? status = null);
+}
+```
+
+### 3. Update DI registration
+
+```csharp
+// Before (Refit)
+builder.Services.AddRefitClient<IOrdersApi>()
+    .ConfigureHttpClient(c => c.BaseAddress = new Uri("https://api.example.com"));
+
+// After (AutoHttpClient.Generator)
+[HttpClient(BaseAddress = "https://api.example.com")]
+public interface IOrdersApi { ... }
+
+builder.Services.AddAutoHttpClients();
+```
+
+### Attribute mapping
+
+| Refit | AutoHttpClient.Generator |
+|---|---|
+| `[Get("/path")]` | `[Get("/path")]` |
+| `[Post("/path")]` | `[Post("/path")]` |
+| `[Put("/path")]` | `[Put("/path")]` |
+| `[Delete("/path")]` | `[Delete("/path")]` |
+| `[Patch("/path")]` | `[Patch("/path")]` |
+| `[Body]` | `[Body]` |
+| `[AliasAs("name")]` | `[Query("name")]` |
+| `[Header("X-Name")]` | `[Header("X-Name")]` |
+| `[HeaderCollection]` | Not supported |
+| `[Authorize]` | Use `[Header("Authorization")]` |
+
+### What Refit supports that AutoHttpClient.Generator doesn't (yet)
+
+- `[HeaderCollection]` dictionary headers
+- `[Multipart]` / `[AttachmentName]` for multipart form uploads
+- `IObservable<T>` return types
+- Custom `JsonSerializerSettings` per method
+
+For projects using any of these heavily, hold off on migrating until support lands.
+
 ## Also by the same author
 
 > 🌐 Full suite overview: **[swevo.github.io](https://swevo.github.io/)**
 
 | Package | Description |
 |---|---|
-| [**AutoWire**](https://github.com/Swevo/AutoWire) | Compile-time DI auto-registration for `Microsoft.Extensions.DependencyInjection`. |
-| [**AutoMap.Generator**](https://github.com/Swevo/AutoMap.Generator) | Compile-time object mapping with generated extension methods. |
-| [**AutoValidate.Generator**](https://github.com/Swevo/AutoValidate.Generator) | Compile-time validator discovery and registration. |
-| [**AutoResult.Generator**](https://github.com/Swevo/AutoResult.Generator) | Compile-time result helpers and `Try*()` wrappers. |
-| [**AutoQuery.Generator**](https://github.com/Swevo/AutoQuery.Generator) | Compile-time query specifications for LINQ-based filtering. |
+| [**AutoLog.Generator**](https://github.com/Swevo/AutoLog.Generator) | Compile-time high-performance logging — `[Log(Level, Message)]` on a partial method generates `LoggerMessage.Define`. AOT-safe. |
+| [**AutoDispatch.Generator**](https://github.com/Swevo/AutoDispatch.Generator) | Compile-time CQRS dispatcher — `[Handler]` generates a strongly-typed `IDispatcher`. No MediatR, no reflection. |
+| [**AutoWire**](https://github.com/Swevo/AutoWire) | Compile-time DI auto-registration — `[Scoped]`/`[Singleton]`/`[Transient]` generates `IServiceCollection` registration code. |
+| [**AutoMap.Generator**](https://github.com/Swevo/AutoMap.Generator) | Compile-time object mapping with generated extension methods. AOT-safe AutoMapper alternative. |
+| [**AutoValidate.Generator**](https://github.com/Swevo/AutoValidate.Generator) | Compile-time FluentValidation wiring — discovers validators and generates `AddValidators()`. |
+| [**AutoResult.Generator**](https://github.com/Swevo/AutoResult.Generator) | Compile-time `Result<T>` — `[TryWrap]` generates `Try*()` wrappers for every public method. |
+| [**AutoQuery.Generator**](https://github.com/Swevo/AutoQuery.Generator) | Compile-time LINQ query specs — `[QuerySpec]` generates a strongly-typed `Apply(IQueryable<T>)`. |
 
 ## License
 
