@@ -14,7 +14,7 @@
     <Authors>Justin Bannister</Authors>
     <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
     <Description>Compile-time typed HTTP client generation for .NET using Roslyn source generators. Add [HttpClient] to an interface and [Get]/[Post]/[Put]/[Delete]/[Patch] to methods — AutoHttpClient generates a strongly-typed HttpClient implementation at build time. AOT-safe Refit alternative. Zero reflection, zero runtime overhead.</Description>
-    <PackageTags>httpclient;rest;api-client;source-generator;roslyn;dotnet;aspnetcore;csharp;compile-time;zero-reflection;aot;refit-alternative;typed-httpclient;maui;openapi</PackageTags>
+    <PackageTags>httpclient;rest;api-client;source-generator;roslyn;dotnet;aspnetcore;csharp;compile-time;zero-reflection;aot;refit-alternative;typed-httpclient;maui;openapi;http;restclient;restsharp-alternative;web-api;restapi</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/Swevo/AutoHttpClient.Generator</RepositoryUrl>
