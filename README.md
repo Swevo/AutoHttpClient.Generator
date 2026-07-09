@@ -3,6 +3,7 @@
 [![NuGet](https://img.shields.io/nuget/v/AutoHttpClient.Generator.svg)](https://www.nuget.org/packages/AutoHttpClient.Generator)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/AutoHttpClient.Generator.svg)](https://www.nuget.org/packages/AutoHttpClient.Generator)
 [![CI](https://github.com/Swevo/AutoHttpClient.Generator/actions/workflows/build.yml/badge.svg)](https://github.com/Swevo/AutoHttpClient.Generator/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 AutoHttpClient.Generator is an **AOT-safe, compile-time typed HTTP client** for .NET. Annotate an interface with `[HttpClient]`, decorate methods with `[Get]`, `[Post]`, `[Put]`, `[Delete]`, or `[Patch]`, and the generator emits a strongly-typed implementation plus DI registration at build time.
 
