@@ -1,4 +1,6 @@
 <Solution>
   <Project Path="src/AutoHttpClient/AutoHttpClient.csproj" />
+  <Project Path="tools/AutoHttpClient.OpenApiScaffold/AutoHttpClient.OpenApiScaffold.csproj" />
   <Project Path="tests/AutoHttpClient.Tests/AutoHttpClient.Tests.csproj" />
+  <Project Path="tests/AutoHttpClient.OpenApiScaffold.Tests/AutoHttpClient.OpenApiScaffold.Tests.csproj" />
 </Solution>

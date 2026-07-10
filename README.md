@@ -132,6 +132,36 @@ services.AddHttpClient<IOrdersApi, OrdersApiClient>(client =>
 });
 ```
 
+## Scaffolding from OpenAPI/Swagger
+
+AutoHttpClient.Generator now includes a small repo-side scaffolding tool for converting an OpenAPI/Swagger JSON document into a partial interface decorated with AutoHttpClient attributes.
+
+Run it with:
+
+```bash
+dotnet run --project tools/AutoHttpClient.OpenApiScaffold -- --input swagger.json --output IMyApiClient.g.cs --namespace MyApp.Clients --interface-name IMyApiClient
+```
+
+The generated file is a one-time scaffold that you add to your project, then the existing `AutoHttpClient.Generator` source generator consumes it normally.
+
+### What it generates
+
+- `[HttpClient]` or `[HttpClient(BaseAddress = "...")]` when the spec declares a simple server URL
+- `[Get]`, `[Post]`, `[Put]`, `[Delete]`, `[Patch]` based on each OpenAPI operation
+- Route parameters as normal method parameters
+- Query parameters as `[Query("name")]`
+- Request bodies as `[Body]`
+- `Task<T>` return types using referenced schema names where possible
+
+### Current scope / limitations
+
+- Optimized for common OpenAPI 3 JSON documents
+- Swagger/OpenAPI 2 documents may work for basic paths/operations, but v3 is the primary target
+- Best support is for JSON request/response bodies with named schemas, simple path/query/header parameters, and standard HTTP verbs
+- Inline/anonymous schemas fall back to `JsonElement` (or collections/dictionaries of known types where possible)
+- Advanced OpenAPI features such as `oneOf`, `anyOf`, callbacks, multipart form uploads, and full DTO generation are not scaffolded yet
+- Named schemas are used as C# type names in the generated interface; you still need matching DTO types in your project
+
 ## Comparison
 
 | Feature | AutoHttpClient.Generator | Refit | RestSharp |
@@ -141,6 +171,7 @@ services.AddHttpClient<IOrdersApi, OrdersApiClient>(client =>
 | Zero reflection dispatch | ✅ | ⚠️ | ❌ |
 | Native `HttpClient` typed client DI | ✅ | ✅ | ⚠️ manual |
 | Interface-first API | ✅ | ✅ | ❌ |
+| OpenAPI/Swagger scaffolding tool | ✅ (repo tool) | ✅ | ⚠️ varies |
 | Build-time diagnostics | ✅ | Limited | ❌ |
 
 ## Diagnostics

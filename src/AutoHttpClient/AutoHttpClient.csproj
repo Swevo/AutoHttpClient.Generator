@@ -10,7 +10,7 @@
     <NoWarn>$(NoWarn);NU5017;NU5128;RS2008</NoWarn>
 
     <PackageId>AutoHttpClient.Generator</PackageId>
-    <Version>1.0.1</Version>
+    <Version>1.1.0</Version>
     <Authors>Justin Bannister</Authors>
     <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
     <Description>Compile-time typed HTTP client generation for .NET using Roslyn source generators. Add [HttpClient] to an interface and [Get]/[Post]/[Put]/[Delete]/[Patch] to methods — AutoHttpClient generates a strongly-typed HttpClient implementation at build time. AOT-safe Refit alternative. Zero reflection, zero runtime overhead.</Description>
@@ -26,7 +26,7 @@
     <IncludeSymbols>false</IncludeSymbols>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
-    <PackageReleaseNotes>1.0.1: Fix package icon (was showing an incorrect/placeholder image). 1.0.0: [HttpClient] on interface; [Get]/[Post]/[Put]/[Delete]/[Patch] methods; [Body]/[Query]/[Header] parameters; route template interpolation; AddAutoHttpClients() DI registration; AH001/AH002/AH003 diagnostics.</PackageReleaseNotes>
+    <PackageReleaseNotes>1.1.0: Add OpenAPI/Swagger scaffolding tool in the repo for generating AutoHttpClient interfaces from spec documents. 1.0.1: Fix package icon (was showing an incorrect/placeholder image). 1.0.0: [HttpClient] on interface; [Get]/[Post]/[Put]/[Delete]/[Patch] methods; [Body]/[Query]/[Header] parameters; route template interpolation; AddAutoHttpClients() DI registration; AH001/AH002/AH003 diagnostics.</PackageReleaseNotes>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.*" PrivateAssets="all" />
