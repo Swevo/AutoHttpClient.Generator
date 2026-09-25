@@ -11,16 +11,16 @@ AutoHttpClient.Generator is an **AOT-safe, compile-time typed HTTP client** for 
 ## Why AutoHttpClient.Generator?
 
 - **Compile-time generated clients** — no dynamic proxy generation, no reflection-heavy dispatch layer
-- **AOT-safe** — generated C# calls `HttpClient` directly, so it works cleanly with native AOT scenarios
+- **AOT-safe request dispatch** — generated C# calls `HttpClient` directly with no reflection-based proxy; see [`samples/AotBenchmark/BENCHMARK.md`](samples/AotBenchmark/BENCHMARK.md) for measured trim-warning results and known remaining gaps
 - **Minimal ceremony** — plain interfaces plus attributes, no hand-written wrappers
 - **DI-ready** — `AddAutoHttpClients()` registers every generated client for `IServiceCollection`
 - **Strongly typed** — route values, query parameters, headers, and JSON bodies all come from your method signature
 
 ### Why not Refit or RestSharp?
 
-- **Refit** is ergonomic, but relies on runtime plumbing and generated proxy behavior that is less predictable in AOT-focused deployments
+- **Refit** (v16+) has also moved to a Roslyn source generator and ships an official Native AOT path (`RestService.ForGenerated<T>` + a `JsonSerializerContext`), so it's no longer purely runtime-proxy based. The real differences today are ergonomics: AutoHttpClient.Generator's generated client can be constructed directly (`new`) or resolved from DI with zero extra AOT-specific API surface, has build-time diagnostics for common mistakes (see [Diagnostics](#diagnostics)), and ships an OpenAPI scaffolding tool. See [`samples/AotBenchmark/BENCHMARK.md`](samples/AotBenchmark/BENCHMARK.md) for a measured, head-to-head trim/AOT comparison — including places where AutoHttpClient.Generator still has warnings Refit doesn't.
 - **RestSharp** is a runtime HTTP abstraction with reflection-oriented configuration rather than compile-time emitted clients
-- **AutoHttpClient.Generator** keeps everything as generated source in your build output: explicit, trim-friendly, and zero-reflection
+- **AutoHttpClient.Generator** keeps everything as generated source in your build output: explicit, trim-friendly, and (for the request-building path) zero-reflection
 
 ## Installation
 
@@ -241,11 +241,11 @@ The generated file is a one-time scaffold that you add to your project, then the
 
 ## Comparison
 
-| Feature | AutoHttpClient.Generator | Refit | RestSharp |
+| Feature | AutoHttpClient.Generator | Refit (v16+) | RestSharp |
 |---|---|---|---|
-| Compile-time generated client | ✅ | Partial/runtime proxy behavior | ❌ |
-| AOT-safe | ✅ | ⚠️ depends on runtime behavior | ❌ |
-| Zero reflection dispatch | ✅ | ⚠️ | ❌ |
+| Compile-time generated client | ✅ | ✅ (also generator-based) | ❌ |
+| AOT-safe out of the box (no reflection-based JSON) | ⚠️ 2 known trim warnings remain — see [BENCHMARK.md](samples/AotBenchmark/BENCHMARK.md) | ✅ with `JsonSerializerContext` | ❌ |
+| Zero reflection dispatch | ✅ | ✅ | ❌ |
 | Native `HttpClient` typed client DI | ✅ | ✅ | ⚠️ manual |
 | Interface-first API | ✅ | ✅ | ❌ |
 | OpenAPI/Swagger scaffolding tool | ✅ (repo tool) | ✅ | ⚠️ varies |
@@ -366,6 +366,7 @@ builder.Services.AddAutoHttpClients();
 
 - `IObservable<T>` return types
 - Custom `JsonSerializerSettings` per method
+- Fully warning-free Native AOT/trim publishing when using a `JsonSerializerContext` — AutoHttpClient.Generator still emits 2 trim warnings from the generic `ReadFromJsonAsync<T>(..., JsonSerializerOptions, ...)` deserialization call and the DI typed-client registration path (measured in [`samples/AotBenchmark/BENCHMARK.md`](samples/AotBenchmark/BENCHMARK.md)); closing this gap by generating `JsonTypeInfo<T>`-based calls is tracked as follow-up work
 
 For projects using any of these heavily, hold off on migrating until support lands.
 

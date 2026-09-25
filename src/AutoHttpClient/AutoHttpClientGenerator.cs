@@ -453,10 +453,17 @@ namespace AutoHttpClient
         sb.Append(indent).AppendLine("    private readonly global::System.Net.Http.HttpClient _httpClient;");
         sb.Append(indent).AppendLine("    private readonly global::System.Text.Json.JsonSerializerOptions _jsonOptions;");
         sb.AppendLine();
-        sb.Append(indent).Append("    public ").Append(info.ImplementationName).AppendLine("(global::System.Net.Http.HttpClient httpClient, global::System.Text.Json.JsonSerializerOptions? jsonOptions = null)");
+        sb.Append(indent).Append("    public ").Append(info.ImplementationName).AppendLine("(global::System.Net.Http.HttpClient httpClient, global::System.Text.Json.JsonSerializerOptions jsonOptions)");
         sb.Append(indent).AppendLine("    {");
         sb.Append(indent).AppendLine("        _httpClient = httpClient;");
-        sb.Append(indent).AppendLine("        _jsonOptions = jsonOptions ?? global::System.Text.Json.JsonSerializerOptions.Web;");
+        sb.Append(indent).AppendLine("        _jsonOptions = jsonOptions;");
+        sb.Append(indent).AppendLine("    }");
+        sb.AppendLine();
+        sb.Append(indent).AppendLine("    [global::System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode(\"Uses the reflection-based JsonSerializerOptions.Web default. Pass an explicit JsonSerializerOptions (ideally backed by a JsonSerializerContext) to avoid trimming/AOT warnings.\")]");
+        sb.Append(indent).AppendLine("    [global::System.Diagnostics.CodeAnalysis.RequiresDynamicCode(\"Uses the reflection-based JsonSerializerOptions.Web default. Pass an explicit JsonSerializerOptions (ideally backed by a JsonSerializerContext) to avoid trimming/AOT warnings.\")]");
+        sb.Append(indent).Append("    public ").Append(info.ImplementationName).AppendLine("(global::System.Net.Http.HttpClient httpClient)");
+        sb.Append(indent).Append("        : this(httpClient, global::System.Text.Json.JsonSerializerOptions.Web)").AppendLine();
+        sb.Append(indent).AppendLine("    {");
         sb.Append(indent).AppendLine("    }");
 
         foreach (var method in info.Methods)

@@ -502,4 +502,27 @@ public interface IOrdersApi
         var attributesSource = sources["AutoHttpClient.Attributes.g.cs"];
         Assert.Contains("public sealed class ApiException : Exception", attributesSource);
     }
+
+    [Fact]
+    public void Constructor_SplitsAotSafeAndFallbackOverloads()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    Task<string> GetAsync(CancellationToken ct = default);
+}", out _);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("public OrdersApiClient(global::System.Net.Http.HttpClient httpClient, global::System.Text.Json.JsonSerializerOptions jsonOptions)", source);
+        Assert.Contains("_jsonOptions = jsonOptions;", source);
+        Assert.Contains("RequiresUnreferencedCode", source);
+        Assert.Contains("RequiresDynamicCode", source);
+        Assert.Contains(": this(httpClient, global::System.Text.Json.JsonSerializerOptions.Web)", source);
+    }
 }
