@@ -84,6 +84,8 @@ AutoHttpClient.Generator classifies parameters using these rules:
 | `[Query("name")]` | Added to the query string using the provided name |
 | `[Query]` or unattributed non-route parameter | Added to the query string using the parameter name |
 | `[Header("X-Name")]` | Added as an HTTP header |
+| `[HeaderCollection]` | Expands an `IDictionary<string, string?>` (or any `IEnumerable<KeyValuePair<string, string?>>`) parameter into one header per entry |
+| `[QueryMap]` | Expands an `IDictionary<string, string?>` (or any `IEnumerable<KeyValuePair<string, string?>>`) parameter into one query string entry per pair |
 | Route parameter | Any parameter whose name appears in the route template, e.g. `{id}` |
 | `CancellationToken` | Passed through to `HttpClient` and JSON helpers |
 
@@ -98,7 +100,63 @@ Task<Order> CreateOrderAsync([Body] CreateOrderRequest request, [Header("X-Tenan
 
 [Get("/api/orders/{id}")]
 Task<Order?> GetOrderAsync(int id, CancellationToken ct = default);
+
+[Get("/api/orders")]
+Task<List<Order>> SearchOrdersAsync([QueryMap] IDictionary<string, string?> filters, CancellationToken ct = default);
+
+[Get("/api/orders")]
+Task<List<Order>> GetOrdersForTenantAsync([HeaderCollection] IDictionary<string, string?> headers, CancellationToken ct = default);
 ```
+
+## Static headers
+
+Apply constant headers to every request generated for an interface or a specific method with `[Headers("Name: Value")]`, similar to Refit:
+
+```csharp
+using AutoHttpClient;
+
+[HttpClient(BaseAddress = "https://api.example.com")]
+[Headers("X-Api-Version: 1.0")]
+public interface IOrdersApi
+{
+    [Get("/api/orders")]
+    [Headers("Accept: application/json")]
+    Task<List<Order>> GetOrdersAsync(CancellationToken ct = default);
+}
+```
+
+Method-level `[Headers]` take priority over interface-level ones when the same header name is declared in both places. `[Headers]` can be applied multiple times on the same target.
+
+## Multipart form uploads
+
+Mark a method `[Multipart]` and decorate its parameters with `[Part]` to send a `multipart/form-data` request — useful for file uploads:
+
+```csharp
+using AutoHttpClient;
+
+[HttpClient(BaseAddress = "https://api.example.com")]
+public interface IUploadsApi
+{
+    [Post("/api/uploads")]
+    [Multipart]
+    Task<UploadResult> UploadAsync(
+        [Part("file", "photo.png")] Stream file,
+        [Part("description")] string description,
+        [Part] UploadMetadata metadata,
+        CancellationToken ct = default);
+}
+```
+
+Part parameter types are handled automatically:
+
+| Parameter type | Generated content |
+|---|---|
+| `string` | `StringContent` |
+| `byte[]` | `ByteArrayContent` |
+| `Stream` (or subclass) | `StreamContent` |
+| Anything else | JSON-serialized via `JsonContent.Create` |
+
+`[Part(name, fileName)]` controls the form field name and, optionally, the file name sent to the server; both default to the parameter name / no file name. A `[Multipart]` method cannot also declare a `[Body]` parameter (`AH004`).
 
 ## Return types
 
@@ -182,6 +240,8 @@ The generated file is a one-time scaffold that you add to your project, then the
 | `AH001` | Warning | Method on a `[HttpClient]` interface has no HTTP method attribute and will not be generated. |
 | `AH002` | Warning | Route template parameter has no matching method parameter. |
 | `AH003` | Error | Method has multiple `[Body]` parameters; only one is allowed. |
+| `AH004` | Error | Method is marked `[Multipart]` but also has a `[Body]` parameter. |
+| `AH005` | Warning | Parameter is marked `[Part]` but its method is not marked `[Multipart]`. |
 
 ## Generated attributes
 
@@ -196,6 +256,11 @@ The package emits these attributes at post-initialization time:
 - `BodyAttribute`
 - `QueryAttribute`
 - `HeaderAttribute`
+- `HeadersAttribute`
+- `HeaderCollectionAttribute`
+- `QueryMapAttribute`
+- `MultipartAttribute`
+- `PartAttribute`
 
 ## Migrating from Refit
 
@@ -270,13 +335,13 @@ builder.Services.AddAutoHttpClients();
 | `[Body]` | `[Body]` |
 | `[AliasAs("name")]` | `[Query("name")]` |
 | `[Header("X-Name")]` | `[Header("X-Name")]` |
-| `[HeaderCollection]` | Not supported |
+| `[Headers("X: Y")]` | `[Headers("X: Y")]` |
+| `[HeaderCollection]` | `[HeaderCollection]` |
+| `[Multipart]` / `[AttachmentName]` | `[Multipart]` / `[Part(name, fileName)]` |
 | `[Authorize]` | Use `[Header("Authorization")]` |
 
 ### What Refit supports that AutoHttpClient.Generator doesn't (yet)
 
-- `[HeaderCollection]` dictionary headers
-- `[Multipart]` / `[AttachmentName]` for multipart form uploads
 - `IObservable<T>` return types
 - Custom `JsonSerializerSettings` per method
 

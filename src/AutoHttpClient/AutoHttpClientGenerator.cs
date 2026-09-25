@@ -76,6 +76,39 @@ namespace AutoHttpClient
         public string Name { get; }
         public HeaderAttribute(string name) => Name = name;
     }
+
+    /// <summary>Adds a constant header (""Name: Value"") to every request generated for the interface or method.</summary>
+    [AttributeUsage(AttributeTargets.Interface | AttributeTargets.Method, AllowMultiple = true, Inherited = false)]
+    public sealed class HeadersAttribute : Attribute
+    {
+        public string[] Headers { get; }
+        public HeadersAttribute(params string[] headers) => Headers = headers;
+    }
+
+    /// <summary>Expands an IDictionary/IEnumerable&lt;KeyValuePair&lt;string, string?&gt;&gt; parameter into per-entry request headers.</summary>
+    [AttributeUsage(AttributeTargets.Parameter, AllowMultiple = false, Inherited = false)]
+    public sealed class HeaderCollectionAttribute : Attribute { }
+
+    /// <summary>Expands an IDictionary/IEnumerable&lt;KeyValuePair&lt;string, string?&gt;&gt; parameter into per-entry query string values.</summary>
+    [AttributeUsage(AttributeTargets.Parameter, AllowMultiple = false, Inherited = false)]
+    public sealed class QueryMapAttribute : Attribute { }
+
+    /// <summary>Marks a method as sending a multipart/form-data request built from its [Part] parameters.</summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class MultipartAttribute : Attribute { }
+
+    /// <summary>Marks a parameter as a part of a [Multipart] request. string/byte[]/Stream become raw content; anything else is JSON-serialized.</summary>
+    [AttributeUsage(AttributeTargets.Parameter, AllowMultiple = false, Inherited = false)]
+    public sealed class PartAttribute : Attribute
+    {
+        public string? Name { get; }
+        public string? FileName { get; }
+        public PartAttribute(string? name = null, string? fileName = null)
+        {
+            Name = name;
+            FileName = fileName;
+        }
+    }
 }
 ";
 
@@ -101,6 +134,22 @@ namespace AutoHttpClient
         messageFormat: "Method '{0}' on '{1}' has multiple [Body] parameters — only one is allowed",
         category: "AutoHttpClient",
         defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AH004 = new(
+        id: "AH004",
+        title: "[Multipart] method has a [Body] parameter",
+        messageFormat: "Method '{0}' on '{1}' is marked [Multipart] and cannot also have a [Body] parameter — use [Part] parameters instead",
+        category: "AutoHttpClient",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AH005 = new(
+        id: "AH005",
+        title: "[Part] parameter requires [Multipart] method",
+        messageFormat: "Parameter '{0}' on method '{1}' in '{2}' is marked [Part] but the method is not marked [Multipart]",
+        category: "AutoHttpClient",
+        defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
@@ -139,9 +188,11 @@ namespace AutoHttpClient
             ImplementationName = GetImplementationName(interfaceSymbol.Name),
             BaseAddress = ReadBaseAddress(context.Attributes),
         };
+        info.Headers.AddRange(ReadStaticHeaders(interfaceSymbol.GetAttributes()));
 
         var cancellationTokenType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
         var httpResponseMessageType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Net.Http.HttpResponseMessage");
+        var streamType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.IO.Stream");
 
         foreach (var method in interfaceSymbol.GetMembers().OfType<IMethodSymbol>())
         {
@@ -152,7 +203,7 @@ namespace AutoHttpClient
                 continue;
             }
 
-            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType);
+            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType);
             info.Diagnostics.AddRange(methodResult.Diagnostics);
 
             if (methodResult.Method is null)
@@ -176,7 +227,8 @@ namespace AutoHttpClient
         IMethodSymbol method,
         string interfaceDisplayName,
         INamedTypeSymbol? cancellationTokenType,
-        INamedTypeSymbol? httpResponseMessageType)
+        INamedTypeSymbol? httpResponseMessageType,
+        INamedTypeSymbol? streamType)
     {
         var diagnostics = new List<PendingDiagnostic>();
         var location = method.Locations.FirstOrDefault() ?? Location.None;
@@ -186,6 +238,8 @@ namespace AutoHttpClient
             diagnostics.Add(new PendingDiagnostic(AH001, location, method.Name, interfaceDisplayName));
             return new MethodAnalysisResult(null, diagnostics);
         }
+
+        var isMultipart = method.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == "AutoHttpClient.MultipartAttribute");
 
         var routeTokens = ParseRouteTokens(template!);
         foreach (var routeToken in routeTokens)
@@ -233,6 +287,26 @@ namespace AutoHttpClient
                 parameterInfo.Kind = ParameterKind.Body;
                 bodyParameters.Add(parameterInfo);
             }
+            else if (TryGetPart(parameter, out var partName, out var partFileName))
+            {
+                if (!isMultipart)
+                {
+                    diagnostics.Add(new PendingDiagnostic(AH005, location, parameter.Name, method.Name, interfaceDisplayName));
+                }
+
+                parameterInfo.Kind = ParameterKind.Part;
+                parameterInfo.PartName = partName ?? parameter.Name;
+                parameterInfo.PartFileName = partFileName;
+                parameterInfo.PartContentKind = ClassifyPartContent(parameter.Type, streamType);
+            }
+            else if (HasAttribute(parameter, "AutoHttpClient.HeaderCollectionAttribute"))
+            {
+                parameterInfo.Kind = ParameterKind.HeaderCollection;
+            }
+            else if (HasAttribute(parameter, "AutoHttpClient.QueryMapAttribute"))
+            {
+                parameterInfo.Kind = ParameterKind.QueryMap;
+            }
             else if (TryGetQueryName(parameter, out var queryName))
             {
                 parameterInfo.Kind = ParameterKind.Query;
@@ -262,6 +336,12 @@ namespace AutoHttpClient
             return new MethodAnalysisResult(null, diagnostics);
         }
 
+        if (isMultipart && bodyParameters.Count > 0)
+        {
+            diagnostics.Add(new PendingDiagnostic(AH004, location, method.Name, interfaceDisplayName));
+            return new MethodAnalysisResult(null, diagnostics);
+        }
+
         return new MethodAnalysisResult(
             new HttpMethodInfo
             {
@@ -272,7 +352,9 @@ namespace AutoHttpClient
                 ReturnHandling = returnHandling,
                 JsonResultTypeFqn = jsonResultTypeFqn,
                 JsonResultNullable = jsonResultNullable,
+                IsMultipart = isMultipart,
                 Parameters = parameters,
+                Headers = ReadStaticHeaders(method.GetAttributes()),
             },
             diagnostics);
     }
@@ -343,14 +425,22 @@ namespace AutoHttpClient
                 .Where(static p => p.Kind == ParameterKind.Route)
                 .ToDictionary(static p => p.Name, static p => p.Name, StringComparer.OrdinalIgnoreCase);
             var queryParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.Query).ToArray();
+            var queryMapParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.QueryMap).ToArray();
             var headerParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.Header).ToArray();
+            var headerCollectionParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.HeaderCollection).ToArray();
             var bodyParameter = method.Parameters.FirstOrDefault(static p => p.Kind == ParameterKind.Body);
+            var partParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.Part).ToArray();
             var ctArgument = GetCancellationTokenArgument(method.Parameters);
-            var useRequestMessage = headerParameters.Length > 0 || RequiresRequestMessage(method.Verb, bodyParameter is not null);
+            var staticHeaders = MergeStaticHeaders(method.Headers, info.Headers);
+            var useRequestMessage = headerParameters.Length > 0
+                || headerCollectionParameters.Length > 0
+                || staticHeaders.Count > 0
+                || method.IsMultipart
+                || RequiresRequestMessage(method.Verb, bodyParameter is not null);
 
             sb.Append(indent).Append("        var __url = ").Append(ToInterpolatedUrlLiteral(method.Template, routeBindings)).AppendLine(";");
 
-            if (queryParameters.Length > 0)
+            if (queryParameters.Length > 0 || queryMapParameters.Length > 0)
             {
                 sb.Append(indent).AppendLine("        var __query = new global::System.Text.StringBuilder();");
                 foreach (var parameter in queryParameters)
@@ -368,6 +458,21 @@ namespace AutoHttpClient
                     }
                 }
 
+                foreach (var parameter in queryMapParameters)
+                {
+                    if (parameter.IsNullable)
+                    {
+                        sb.Append(indent).Append("        if (").Append(parameter.Name).AppendLine(" != null)");
+                        sb.Append(indent).AppendLine("        {");
+                        AppendQueryMapAppendLines(sb, indent + "            ", parameter);
+                        sb.Append(indent).AppendLine("        }");
+                    }
+                    else
+                    {
+                        AppendQueryMapAppendLines(sb, indent + "        ", parameter);
+                    }
+                }
+
                 sb.Append(indent).AppendLine("        if (__query.Length > 0)");
                 sb.Append(indent).AppendLine("        {");
                 sb.Append(indent).AppendLine("            __url += \"?\" + __query.ToString();");
@@ -377,9 +482,44 @@ namespace AutoHttpClient
             if (useRequestMessage)
             {
                 sb.Append(indent).Append("        using var __request = new global::System.Net.Http.HttpRequestMessage(").Append(GetHttpMethodExpression(method.Verb)).AppendLine(", __url);");
-                if (bodyParameter is not null)
+                if (method.IsMultipart)
+                {
+                    sb.Append(indent).AppendLine("        var __multipart = new global::System.Net.Http.MultipartFormDataContent();");
+                    foreach (var parameter in partParameters)
+                    {
+                        AppendPartAppendLines(sb, indent + "        ", parameter);
+                    }
+
+                    sb.Append(indent).AppendLine("        __request.Content = __multipart;");
+                }
+                else if (bodyParameter is not null)
                 {
                     sb.Append(indent).Append("        __request.Content = global::System.Net.Http.Json.JsonContent.Create(").Append(bodyParameter.Name).AppendLine(", options: _jsonOptions);");
+                }
+
+                foreach (var (headerName, headerValue) in staticHeaders)
+                {
+                    sb.Append(indent)
+                        .Append("        __request.Headers.TryAddWithoutValidation(")
+                        .Append(ToCSharpStringLiteral(headerName))
+                        .Append(", ")
+                        .Append(ToCSharpStringLiteral(headerValue))
+                        .AppendLine(");");
+                }
+
+                foreach (var parameter in headerCollectionParameters)
+                {
+                    if (parameter.IsNullable)
+                    {
+                        sb.Append(indent).Append("        if (").Append(parameter.Name).AppendLine(" != null)");
+                        sb.Append(indent).AppendLine("        {");
+                        AppendHeaderCollectionAppendLines(sb, indent + "            ", parameter);
+                        sb.Append(indent).AppendLine("        }");
+                    }
+                    else
+                    {
+                        AppendHeaderCollectionAppendLines(sb, indent + "        ", parameter);
+                    }
                 }
 
                 foreach (var parameter in headerParameters)
@@ -517,6 +657,95 @@ namespace AutoHttpClient
             .Append(", ")
             .Append(parameter.Name)
             .AppendLine(".ToString()!);");
+    }
+
+    private static void AppendQueryMapAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter)
+    {
+        var loopVariable = "__entry_" + parameter.Name;
+        sb.Append(indent).Append("foreach (var ").Append(loopVariable).Append(" in ").Append(parameter.Name).AppendLine(")");
+        sb.Append(indent).AppendLine("{");
+        sb.Append(indent).Append("    if (").Append(loopVariable).AppendLine(".Value != null)");
+        sb.Append(indent).AppendLine("    {");
+        sb.Append(indent).AppendLine("        if (__query.Length > 0) __query.Append('&');");
+        sb.Append(indent)
+            .Append("        __query.Append(global::System.Uri.EscapeDataString(")
+            .Append(loopVariable)
+            .Append(".Key)).Append(\"=\").Append(global::System.Uri.EscapeDataString(")
+            .Append(loopVariable)
+            .AppendLine(".Value.ToString()!));");
+        sb.Append(indent).AppendLine("    }");
+        sb.Append(indent).AppendLine("}");
+    }
+
+    private static void AppendHeaderCollectionAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter)
+    {
+        var loopVariable = "__entry_" + parameter.Name;
+        sb.Append(indent).Append("foreach (var ").Append(loopVariable).Append(" in ").Append(parameter.Name).AppendLine(")");
+        sb.Append(indent).AppendLine("{");
+        sb.Append(indent).Append("    if (").Append(loopVariable).AppendLine(".Value != null)");
+        sb.Append(indent).AppendLine("    {");
+        sb.Append(indent)
+            .Append("        __request.Headers.TryAddWithoutValidation(")
+            .Append(loopVariable)
+            .Append(".Key, ")
+            .Append(loopVariable)
+            .AppendLine(".Value.ToString()!);");
+        sb.Append(indent).AppendLine("    }");
+        sb.Append(indent).AppendLine("}");
+    }
+
+    private static void AppendPartAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter)
+    {
+        var contentVariable = "__part_" + parameter.Name;
+        switch (parameter.PartContentKind)
+        {
+            case PartContentKind.String:
+                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = new global::System.Net.Http.StringContent(").Append(parameter.Name).AppendLine(" ?? string.Empty);");
+                break;
+            case PartContentKind.ByteArray:
+                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = new global::System.Net.Http.ByteArrayContent(").Append(parameter.Name).AppendLine(");");
+                break;
+            case PartContentKind.Stream:
+                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = new global::System.Net.Http.StreamContent(").Append(parameter.Name).AppendLine(");");
+                break;
+            default:
+                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = global::System.Net.Http.Json.JsonContent.Create(").Append(parameter.Name).AppendLine(", options: _jsonOptions);");
+                break;
+        }
+
+        sb.Append(indent).Append("__multipart.Add(").Append(contentVariable).Append(", ").Append(ToCSharpStringLiteral(parameter.PartName ?? parameter.Name));
+        if (!string.IsNullOrEmpty(parameter.PartFileName))
+        {
+            sb.Append(", ").Append(ToCSharpStringLiteral(parameter.PartFileName!));
+        }
+
+        sb.AppendLine(");");
+    }
+
+    private static List<(string Name, string Value)> MergeStaticHeaders(
+        IReadOnlyList<(string Name, string Value)> methodHeaders,
+        IReadOnlyList<(string Name, string Value)> interfaceHeaders)
+    {
+        var result = new List<(string Name, string Value)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var header in methodHeaders)
+        {
+            if (seen.Add(header.Name))
+            {
+                result.Add(header);
+            }
+        }
+
+        foreach (var header in interfaceHeaders)
+        {
+            if (seen.Add(header.Name))
+            {
+                result.Add(header);
+            }
+        }
+
+        return result;
     }
 
     private static string GetDirectCall(HttpMethodInfo method, MethodParameterInfo? bodyParameter, string ctArgument)
@@ -670,8 +899,100 @@ namespace AutoHttpClient
         return false;
     }
 
+    private static bool TryGetPart(IParameterSymbol parameter, out string? name, out string? fileName)
+    {
+        foreach (var attribute in parameter.GetAttributes())
+        {
+            if (attribute.AttributeClass?.ToDisplayString() != "AutoHttpClient.PartAttribute")
+            {
+                continue;
+            }
+
+            name = attribute.ConstructorArguments.Length > 0 ? attribute.ConstructorArguments[0].Value as string : null;
+            fileName = attribute.ConstructorArguments.Length > 1 ? attribute.ConstructorArguments[1].Value as string : null;
+            return true;
+        }
+
+        name = null;
+        fileName = null;
+        return false;
+    }
+
+    private static PartContentKind ClassifyPartContent(ITypeSymbol type, INamedTypeSymbol? streamType)
+    {
+        if (type.SpecialType == SpecialType.System_String)
+        {
+            return PartContentKind.String;
+        }
+
+        if (type is IArrayTypeSymbol { ElementType.SpecialType: SpecialType.System_Byte })
+        {
+            return PartContentKind.ByteArray;
+        }
+
+        if (streamType is not null && InheritsFromOrEquals(type, streamType))
+        {
+            return PartContentKind.Stream;
+        }
+
+        return PartContentKind.Json;
+    }
+
+    private static bool InheritsFromOrEquals(ITypeSymbol type, INamedTypeSymbol target)
+    {
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            if (SymbolEqualityComparer.Default.Equals(current, target))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool HasAttribute(IParameterSymbol parameter, string metadataName)
         => parameter.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == metadataName);
+
+    private static List<(string Name, string Value)> ReadStaticHeaders(IEnumerable<AttributeData> attributes)
+    {
+        var result = new List<(string, string)>();
+        foreach (var attribute in attributes)
+        {
+            if (attribute.AttributeClass?.ToDisplayString() != "AutoHttpClient.HeadersAttribute")
+            {
+                continue;
+            }
+
+            if (attribute.ConstructorArguments.Length != 1)
+            {
+                continue;
+            }
+
+            foreach (var element in attribute.ConstructorArguments[0].Values)
+            {
+                if (element.Value is not string headerLine)
+                {
+                    continue;
+                }
+
+                var separatorIndex = headerLine.IndexOf(':');
+                if (separatorIndex <= 0)
+                {
+                    continue;
+                }
+
+                var name = headerLine.Substring(0, separatorIndex).Trim();
+                var value = headerLine.Substring(separatorIndex + 1).Trim();
+                if (name.Length > 0)
+                {
+                    result.Add((name, value));
+                }
+            }
+        }
+
+        return result;
+    }
 
     private static string? ReadBaseAddress(ImmutableArray<AttributeData> attributes)
     {
@@ -837,6 +1158,7 @@ namespace AutoHttpClient
         public bool CanGenerate { get; set; } = true;
         public List<HttpMethodInfo> Methods { get; } = new();
         public List<PendingDiagnostic> Diagnostics { get; } = new();
+        public List<(string Name, string Value)> Headers { get; } = new();
     }
 
     private sealed class HttpMethodInfo
@@ -849,6 +1171,8 @@ namespace AutoHttpClient
         public string? JsonResultTypeFqn { get; set; }
         public bool JsonResultNullable { get; set; }
         public IReadOnlyList<MethodParameterInfo> Parameters { get; set; } = Array.Empty<MethodParameterInfo>();
+        public List<(string Name, string Value)> Headers { get; set; } = new();
+        public bool IsMultipart { get; set; }
     }
 
     private sealed class MethodParameterInfo
@@ -858,6 +1182,9 @@ namespace AutoHttpClient
         public ParameterKind Kind { get; set; }
         public string? QueryName { get; set; }
         public string? HeaderName { get; set; }
+        public string? PartName { get; set; }
+        public string? PartFileName { get; set; }
+        public PartContentKind PartContentKind { get; set; }
         public bool IsOptional { get; set; }
         public bool IsNullable { get; set; }
     }
@@ -878,6 +1205,17 @@ namespace AutoHttpClient
         Header,
         Body,
         CancellationToken,
+        HeaderCollection,
+        QueryMap,
+        Part,
+    }
+
+    private enum PartContentKind
+    {
+        String,
+        ByteArray,
+        Stream,
+        Json,
     }
 
     private enum ReturnHandlingKind

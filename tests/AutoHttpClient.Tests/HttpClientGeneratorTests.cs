@@ -64,6 +64,27 @@ namespace System.Net.Http
         public static HttpMethod Delete { get; } = new HttpMethod();
         public static HttpMethod Patch { get; } = new HttpMethod();
     }
+
+    public class MultipartFormDataContent : HttpContent
+    {
+        public void Add(HttpContent content, string name) { }
+        public void Add(HttpContent content, string name, string fileName) { }
+    }
+
+    public class StringContent : HttpContent
+    {
+        public StringContent(string content) { }
+    }
+
+    public class ByteArrayContent : HttpContent
+    {
+        public ByteArrayContent(byte[] content) { }
+    }
+
+    public class StreamContent : HttpContent
+    {
+        public StreamContent(global::System.IO.Stream content) { }
+    }
 }
 ";
 
@@ -293,5 +314,143 @@ public interface IOrdersApi
 }", out var diagnostics);
 
         Assert.Contains(diagnostics, d => d.Id == "AH003" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void StaticHeaders_OnInterfaceAndMethod_AreEmitted()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+[Headers(""X-Api-Version: 1.0"")]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    [Headers(""Accept: application/json"")]
+    Task<string> GetAsync(CancellationToken ct = default);
+}", out _);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("__request.Headers.TryAddWithoutValidation(\"Accept\", \"application/json\");", source);
+        Assert.Contains("__request.Headers.TryAddWithoutValidation(\"X-Api-Version\", \"1.0\");", source);
+    }
+
+    [Fact]
+    public void HeaderCollection_ExpandsIntoRequestHeaders()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    Task<string> GetAsync([HeaderCollection] IDictionary<string, string?> headers, CancellationToken ct = default);
+}", out _);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("foreach (var __entry_headers in headers)", source);
+        Assert.Contains("__request.Headers.TryAddWithoutValidation(__entry_headers.Key, __entry_headers.Value.ToString()!);", source);
+    }
+
+    [Fact]
+    public void QueryMap_ExpandsIntoQueryString()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    Task<string> GetAsync([QueryMap] IDictionary<string, string?> filters, CancellationToken ct = default);
+}", out _);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("foreach (var __entry_filters in filters)", source);
+        Assert.Contains("__query.Append(global::System.Uri.EscapeDataString(__entry_filters.Key)).Append(\"=\").Append(global::System.Uri.EscapeDataString(__entry_filters.Value.ToString()!));", source);
+    }
+
+    [Fact]
+    public void Multipart_WithMixedPartTypes_GeneratesMultipartContent()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class Metadata { }
+
+[HttpClient]
+public interface IUploadsApi
+{
+    [Post(""/api/uploads"")]
+    [Multipart]
+    Task<string> UploadAsync(
+        [Part(""file"", ""photo.png"")] Stream file,
+        [Part(""description"")] string description,
+        [Part] Metadata metadata,
+        CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var source = sources["IUploadsApi.AutoHttpClient.g.cs"];
+        Assert.Contains("var __multipart = new global::System.Net.Http.MultipartFormDataContent();", source);
+        Assert.Contains("new global::System.Net.Http.StreamContent(file)", source);
+        Assert.Contains("__multipart.Add(__part_file, \"file\", \"photo.png\");", source);
+        Assert.Contains("new global::System.Net.Http.StringContent(description ?? string.Empty)", source);
+        Assert.Contains("__multipart.Add(__part_description, \"description\");", source);
+        Assert.Contains("global::System.Net.Http.Json.JsonContent.Create(metadata, options: _jsonOptions)", source);
+        Assert.Contains("__request.Content = __multipart;", source);
+    }
+
+    [Fact]
+    public void AH004_MultipartWithBody_DiagnosticReported()
+    {
+        RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class Payload { }
+
+[HttpClient]
+public interface IUploadsApi
+{
+    [Post(""/api/uploads"")]
+    [Multipart]
+    Task<string> UploadAsync([Body] Payload payload, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AH004" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void AH005_PartWithoutMultipart_DiagnosticReported()
+    {
+        RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+public interface IUploadsApi
+{
+    [Post(""/api/uploads"")]
+    Task<string> UploadAsync([Part] string description, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AH005" && d.Severity == DiagnosticSeverity.Warning);
     }
 }
