@@ -109,6 +109,46 @@ namespace AutoHttpClient
             FileName = fileName;
         }
     }
+
+    /// <summary>Thrown when a generated client receives a non-success HTTP response. Carries the status code, reason phrase, and raw response body.</summary>
+    public sealed class ApiException : Exception
+    {
+        public int StatusCode { get; }
+        public string? ReasonPhrase { get; }
+        public string? Content { get; }
+
+        public ApiException(int statusCode, string? reasonPhrase, string? content)
+            : base(""Response status code does not indicate success: "" + statusCode + "" ("" + reasonPhrase + "")."")
+        {
+            StatusCode = statusCode;
+            ReasonPhrase = reasonPhrase;
+            Content = content;
+        }
+    }
+
+    /// <summary>Internal helper used by generated clients to translate a failed response into an <see cref=""ApiException""/>.</summary>
+    public static class AutoHttpClientResponseExtensions
+    {
+        public static async global::System.Threading.Tasks.Task EnsureSuccessAsync(global::System.Net.Http.HttpResponseMessage response, global::System.Threading.CancellationToken cancellationToken)
+        {
+            if (response.IsSuccessStatusCode)
+            {
+                return;
+            }
+
+            string? content = null;
+            try
+            {
+                content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort attempt to capture the error body; ignore failures reading it.
+            }
+
+            throw new ApiException((int)response.StatusCode, response.ReasonPhrase, content);
+        }
+    }
 }
 ";
 
@@ -193,6 +233,7 @@ namespace AutoHttpClient
         var cancellationTokenType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
         var httpResponseMessageType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Net.Http.HttpResponseMessage");
         var streamType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.IO.Stream");
+        var enumerableOfTType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Collections.Generic.IEnumerable`1");
 
         foreach (var method in interfaceSymbol.GetMembers().OfType<IMethodSymbol>())
         {
@@ -203,7 +244,7 @@ namespace AutoHttpClient
                 continue;
             }
 
-            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType);
+            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType, enumerableOfTType);
             info.Diagnostics.AddRange(methodResult.Diagnostics);
 
             if (methodResult.Method is null)
@@ -228,7 +269,8 @@ namespace AutoHttpClient
         string interfaceDisplayName,
         INamedTypeSymbol? cancellationTokenType,
         INamedTypeSymbol? httpResponseMessageType,
-        INamedTypeSymbol? streamType)
+        INamedTypeSymbol? streamType,
+        INamedTypeSymbol? enumerableOfTType)
     {
         var diagnostics = new List<PendingDiagnostic>();
         var location = method.Locations.FirstOrDefault() ?? Location.None;
@@ -311,6 +353,7 @@ namespace AutoHttpClient
             {
                 parameterInfo.Kind = ParameterKind.Query;
                 parameterInfo.QueryName = queryName;
+                parameterInfo.IsCollectionQuery = IsQueryCollectionType(parameter.Type, enumerableOfTType);
             }
             else if (TryGetHeaderName(parameter, out var headerName))
             {
@@ -325,6 +368,7 @@ namespace AutoHttpClient
             {
                 parameterInfo.Kind = ParameterKind.Query;
                 parameterInfo.QueryName = parameter.Name;
+                parameterInfo.IsCollectionQuery = IsQueryCollectionType(parameter.Type, enumerableOfTType);
             }
 
             parameters.Add(parameterInfo);
@@ -610,13 +654,13 @@ namespace AutoHttpClient
         switch (method.ReturnHandling)
         {
             case ReturnHandlingKind.None:
-                sb.Append(indent).AppendLine("        __response.EnsureSuccessStatusCode();");
+                sb.Append(indent).Append("        await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
                 break;
             case ReturnHandlingKind.Response:
                 sb.Append(indent).AppendLine("        return __response;");
                 break;
             default:
-                sb.Append(indent).AppendLine("        __response.EnsureSuccessStatusCode();");
+                sb.Append(indent).Append("        await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
                 if (method.JsonResultNullable)
                 {
                     sb.Append(indent)
@@ -642,6 +686,25 @@ namespace AutoHttpClient
 
     private static void AppendQueryAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter)
     {
+        if (parameter.IsCollectionQuery)
+        {
+            var loopVariable = "__item_" + parameter.Name;
+            sb.Append(indent).Append("foreach (var ").Append(loopVariable).Append(" in ").Append(parameter.Name).AppendLine(")");
+            sb.Append(indent).AppendLine("{");
+            sb.Append(indent).Append("    if (").Append(loopVariable).AppendLine(" != null)");
+            sb.Append(indent).AppendLine("    {");
+            sb.Append(indent).AppendLine("        if (__query.Length > 0) __query.Append('&');");
+            sb.Append(indent)
+                .Append("        __query.Append(")
+                .Append(ToCSharpStringLiteral(parameter.QueryName ?? parameter.Name))
+                .Append(").Append(\"=\").Append(global::System.Uri.EscapeDataString(")
+                .Append(loopVariable)
+                .AppendLine(".ToString()!));");
+            sb.Append(indent).AppendLine("    }");
+            sb.Append(indent).AppendLine("}");
+            return;
+        }
+
         sb.Append(indent).AppendLine("if (__query.Length > 0) __query.Append('&');");
         sb.Append(indent)
             .Append("__query.Append(")
@@ -951,6 +1014,26 @@ namespace AutoHttpClient
         return false;
     }
 
+    private static bool IsQueryCollectionType(ITypeSymbol type, INamedTypeSymbol? enumerableOfT)
+    {
+        if (type.SpecialType == SpecialType.System_String || enumerableOfT is null)
+        {
+            return false;
+        }
+
+        if (type is IArrayTypeSymbol)
+        {
+            return true;
+        }
+
+        if (type is INamedTypeSymbol named && named.IsGenericType && SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, enumerableOfT))
+        {
+            return true;
+        }
+
+        return type.AllInterfaces.Any(i => i.IsGenericType && SymbolEqualityComparer.Default.Equals(i.OriginalDefinition, enumerableOfT));
+    }
+
     private static bool HasAttribute(IParameterSymbol parameter, string metadataName)
         => parameter.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == metadataName);
 
@@ -1187,6 +1270,7 @@ namespace AutoHttpClient
         public PartContentKind PartContentKind { get; set; }
         public bool IsOptional { get; set; }
         public bool IsNullable { get; set; }
+        public bool IsCollectionQuery { get; set; }
     }
 
     private enum HttpVerb

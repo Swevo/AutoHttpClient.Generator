@@ -37,10 +37,16 @@ namespace System.Net.Http
     public class HttpResponseMessage
     {
         public HttpContent Content { get; set; } = new HttpContent();
+        public bool IsSuccessStatusCode { get; set; } = true;
+        public int StatusCode { get; set; } = 200;
+        public string? ReasonPhrase { get; set; } = ""OK"";
         public void EnsureSuccessStatusCode() { }
     }
 
-    public class HttpContent { }
+    public class HttpContent
+    {
+        public global::System.Threading.Tasks.Task<string> ReadAsStringAsync(global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(string.Empty);
+    }
 
     public class HttpRequestMessage : global::System.IDisposable
     {
@@ -452,5 +458,48 @@ public interface IUploadsApi
 }", out var diagnostics);
 
         Assert.Contains(diagnostics, d => d.Id == "AH005" && d.Severity == DiagnosticSeverity.Warning);
+    }
+
+    [Fact]
+    public void CollectionQueryParam_ExpandsAsRepeatedEntries()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    Task<string> GetAsync([Query(""tag"")] List<string> tags, CancellationToken ct = default);
+}", out _);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("foreach (var __item_tags in tags)", source);
+        Assert.Contains("__query.Append(\"tag\").Append(\"=\").Append(global::System.Uri.EscapeDataString(__item_tags.ToString()!));", source);
+    }
+
+    [Fact]
+    public void NonSuccessResponse_ThrowsApiException()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    Task<string> GetAsync(CancellationToken ct = default);
+}", out _);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ct).ConfigureAwait(false);", source);
+
+        var attributesSource = sources["AutoHttpClient.Attributes.g.cs"];
+        Assert.Contains("public sealed class ApiException : Exception", attributesSource);
     }
 }

@@ -83,6 +83,7 @@ AutoHttpClient.Generator classifies parameters using these rules:
 | `[Body]` | Serialized as JSON request content |
 | `[Query("name")]` | Added to the query string using the provided name |
 | `[Query]` or unattributed non-route parameter | Added to the query string using the parameter name |
+| Array/`IEnumerable<T>` query parameter (not `string`) | Expanded into one repeated `name=value` entry per element |
 | `[Header("X-Name")]` | Added as an HTTP header |
 | `[HeaderCollection]` | Expands an `IDictionary<string, string?>` (or any `IEnumerable<KeyValuePair<string, string?>>`) parameter into one header per entry |
 | `[QueryMap]` | Expands an `IDictionary<string, string?>` (or any `IEnumerable<KeyValuePair<string, string?>>`) parameter into one query string entry per pair |
@@ -162,10 +163,27 @@ Part parameter types are handled automatically:
 
 | Return type | Generated behavior |
 |---|---|
-| `Task` | Sends the request and calls `EnsureSuccessStatusCode()` |
-| `Task<T>` | Sends the request, ensures success, and deserializes JSON with `ReadFromJsonAsync<T>()` |
+| `Task` | Sends the request and throws `ApiException` on a non-success status code |
+| `Task<T>` | Sends the request, checks for success, and deserializes JSON with `ReadFromJsonAsync<T>()` |
 | `Task<T?>` | Same as `Task<T>` but preserves nullable result types |
-| `Task<HttpResponseMessage>` | Returns the raw response without `EnsureSuccessStatusCode()` |
+| `Task<HttpResponseMessage>` | Returns the raw response without any success check |
+
+## Error handling
+
+Non-success responses throw `AutoHttpClient.ApiException` (instead of a bare `EnsureSuccessStatusCode()` call) so you don't lose the response body:
+
+```csharp
+try
+{
+    var order = await ordersApi.GetOrderAsync(404, ct);
+}
+catch (AutoHttpClient.ApiException ex)
+{
+    // ex.StatusCode, ex.ReasonPhrase, ex.Content (raw response body, best-effort)
+}
+```
+
+If you need the raw `HttpResponseMessage` instead (no exception thrown), use a `Task<HttpResponseMessage>` return type.
 
 ## BaseAddress configuration
 
@@ -232,6 +250,9 @@ The generated file is a one-time scaffold that you add to your project, then the
 | Interface-first API | ✅ | ✅ | ❌ |
 | OpenAPI/Swagger scaffolding tool | ✅ (repo tool) | ✅ | ⚠️ varies |
 | Build-time diagnostics | ✅ | Limited | ❌ |
+| Typed exception with response body on failure | ✅ (`ApiException`) | ✅ (`ApiException`) | ⚠️ manual |
+| Collection query parameter expansion | ✅ | ✅ | ⚠️ manual |
+| Multipart/form-data uploads | ✅ | ✅ | ⚠️ manual |
 
 ## Diagnostics
 
@@ -261,6 +282,7 @@ The package emits these attributes at post-initialization time:
 - `QueryMapAttribute`
 - `MultipartAttribute`
 - `PartAttribute`
+- `ApiException`
 
 ## Migrating from Refit
 
