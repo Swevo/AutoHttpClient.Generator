@@ -545,7 +545,7 @@ namespace AutoHttpClient
                 }
                 else if (bodyParameter is not null)
                 {
-                    sb.Append(indent).Append("        __request.Content = global::System.Net.Http.Json.JsonContent.Create(").Append(bodyParameter.Name).AppendLine(", options: _jsonOptions);");
+                    sb.Append(indent).Append("        __request.Content = global::System.Net.Http.Json.JsonContent.Create(").Append(bodyParameter.Name).Append(", ").Append(JsonTypeInfoExpression(bodyParameter.TypeFqn)).AppendLine(");");
                 }
 
                 foreach (var (headerName, headerValue) in staticHeaders)
@@ -617,8 +617,10 @@ namespace AutoHttpClient
         sb.AppendLine();
         sb.AppendLine("public static class AutoHttpClientExtensions");
         sb.AppendLine("{");
+
         sb.AppendLine("    public static global::Microsoft.Extensions.DependencyInjection.IServiceCollection AddAutoHttpClients(");
-        sb.AppendLine("        this global::Microsoft.Extensions.DependencyInjection.IServiceCollection services)");
+        sb.AppendLine("        this global::Microsoft.Extensions.DependencyInjection.IServiceCollection services,");
+        sb.AppendLine("        global::System.Text.Json.JsonSerializerOptions jsonOptions)");
         sb.AppendLine("    {");
 
         foreach (var info in interfaces.OrderBy(static x => x.InterfaceTypeFqn, StringComparer.Ordinal))
@@ -626,32 +628,41 @@ namespace AutoHttpClient
             var implementationFqn = string.IsNullOrEmpty(info.Namespace)
                 ? $"global::{info.ImplementationName}"
                 : $"global::{info.Namespace}.{info.ImplementationName}";
+            var clientName = ToCSharpStringLiteral(info.InterfaceTypeFqn);
+            var builderVariable = "__builder_" + info.ImplementationName;
 
             if (string.IsNullOrWhiteSpace(info.BaseAddress))
             {
-                sb.Append("        global::Microsoft.Extensions.DependencyInjection.HttpClientFactoryServiceCollectionExtensions.AddHttpClient<")
-                    .Append(info.InterfaceTypeFqn)
-                    .Append(", ")
-                    .Append(implementationFqn)
-                    .AppendLine(">(services);");
+                sb.Append("        var ").Append(builderVariable).Append(" = global::Microsoft.Extensions.DependencyInjection.HttpClientFactoryServiceCollectionExtensions.AddHttpClient(services, ").Append(clientName).AppendLine(");");
             }
             else
             {
-                sb.Append("        global::Microsoft.Extensions.DependencyInjection.HttpClientFactoryServiceCollectionExtensions.AddHttpClient<")
-                    .Append(info.InterfaceTypeFqn)
-                    .Append(", ")
-                    .Append(implementationFqn)
-                    .AppendLine(">(services, static client =>");
+                sb.Append("        var ").Append(builderVariable).Append(" = global::Microsoft.Extensions.DependencyInjection.HttpClientFactoryServiceCollectionExtensions.AddHttpClient(services, ").Append(clientName).AppendLine(", client =>");
                 sb.AppendLine("        {");
                 sb.Append("            client.BaseAddress = new global::System.Uri(")
                     .Append(ToCSharpStringLiteral(info.BaseAddress!))
                     .AppendLine(");");
                 sb.AppendLine("        });");
             }
+
+            sb.Append("        global::Microsoft.Extensions.DependencyInjection.HttpClientBuilderExtensions.AddTypedClient<")
+                .Append(info.InterfaceTypeFqn)
+                .Append(">(")
+                .Append(builderVariable)
+                .Append(", httpClient => new ")
+                .Append(implementationFqn)
+                .AppendLine("(httpClient, jsonOptions));");
         }
 
         sb.AppendLine("        return services;");
         sb.AppendLine("    }");
+        sb.AppendLine();
+        sb.AppendLine("    [global::System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode(\"Uses the reflection-based JsonSerializerOptions.Web default. Pass an explicit JsonSerializerOptions (ideally backed by a JsonSerializerContext) to avoid trimming/AOT warnings.\")]");
+        sb.AppendLine("    [global::System.Diagnostics.CodeAnalysis.RequiresDynamicCode(\"Uses the reflection-based JsonSerializerOptions.Web default. Pass an explicit JsonSerializerOptions (ideally backed by a JsonSerializerContext) to avoid trimming/AOT warnings.\")]");
+        sb.AppendLine("    public static global::Microsoft.Extensions.DependencyInjection.IServiceCollection AddAutoHttpClients(");
+        sb.AppendLine("        this global::Microsoft.Extensions.DependencyInjection.IServiceCollection services)");
+        sb.AppendLine("        => AddAutoHttpClients(services, global::System.Text.Json.JsonSerializerOptions.Web);");
+
         sb.AppendLine("}");
         return sb.ToString();
     }
@@ -671,18 +682,18 @@ namespace AutoHttpClient
                 if (method.JsonResultNullable)
                 {
                     sb.Append(indent)
-                        .Append("        return await global::System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync<")
-                        .Append(method.JsonResultTypeFqn)
-                        .Append(">(__response.Content, _jsonOptions, ")
+                        .Append("        return await global::System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync(__response.Content, ")
+                        .Append(JsonTypeInfoExpression(method.JsonResultTypeFqn!))
+                        .Append(", ")
                         .Append(ctArgument)
                         .AppendLine(").ConfigureAwait(false);");
                 }
                 else
                 {
                     sb.Append(indent)
-                        .Append("        return (await global::System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync<")
-                        .Append(method.JsonResultTypeFqn)
-                        .Append(">(__response.Content, _jsonOptions, ")
+                        .Append("        return (await global::System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync(__response.Content, ")
+                        .Append(JsonTypeInfoExpression(method.JsonResultTypeFqn!))
+                        .Append(", ")
                         .Append(ctArgument)
                         .AppendLine(").ConfigureAwait(false))!;");
                 }
@@ -764,6 +775,9 @@ namespace AutoHttpClient
         sb.Append(indent).AppendLine("}");
     }
 
+    private static string JsonTypeInfoExpression(string typeFqn)
+        => $"(global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<{typeFqn}>)_jsonOptions.GetTypeInfo(typeof({typeFqn}))";
+
     private static void AppendPartAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter)
     {
         var contentVariable = "__part_" + parameter.Name;
@@ -779,7 +793,7 @@ namespace AutoHttpClient
                 sb.Append(indent).Append("var ").Append(contentVariable).Append(" = new global::System.Net.Http.StreamContent(").Append(parameter.Name).AppendLine(");");
                 break;
             default:
-                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = global::System.Net.Http.Json.JsonContent.Create(").Append(parameter.Name).AppendLine(", options: _jsonOptions);");
+                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = global::System.Net.Http.Json.JsonContent.Create(").Append(parameter.Name).Append(", ").Append(JsonTypeInfoExpression(parameter.TypeFqn)).AppendLine(");");
                 break;
         }
 
@@ -824,9 +838,9 @@ namespace AutoHttpClient
         {
             HttpVerb.Get => $"_httpClient.GetAsync(__url, {ctArgument})",
             HttpVerb.Delete when bodyParameter is null => $"_httpClient.DeleteAsync(__url, {ctArgument})",
-            HttpVerb.Post when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, _jsonOptions, {ctArgument})",
-            HttpVerb.Put when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PutAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, _jsonOptions, {ctArgument})",
-            HttpVerb.Patch when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PatchAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, _jsonOptions, {ctArgument})",
+            HttpVerb.Post when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn)}, {ctArgument})",
+            HttpVerb.Put when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PutAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn)}, {ctArgument})",
+            HttpVerb.Patch when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PatchAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn)}, {ctArgument})",
             _ => throw new InvalidOperationException("Method requires HttpRequestMessage generation."),
         };
     }

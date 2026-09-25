@@ -15,50 +15,58 @@ have the full AOT prerequisites installed, both sample apps already have
 `PublishAot=true` set in their `.csproj` and can be published as-is.
 
 Sample apps live in `samples/AotBenchmark/AutoHttpClientApp` and
-`samples/AotBenchmark/RefitApp`. Each declares one `[Get("/ping")]` method returning a
-`PingResult`, backed by a source-generated `JsonSerializerContext`.
+`samples/AotBenchmark/RefitApp`. Each declares a `[Get("/ping")]` method and a
+`[Post("/ping")]` method with a JSON `[Body]`, both returning `PingResult`, backed by a
+source-generated `JsonSerializerContext`. `AutoHttpClientApp` exercises both direct
+`new PingApiClient(...)` construction and the `AddAutoHttpClients(jsonOptions)` DI
+registration path, to prove both are warning-free.
 
 ## Results (win-x64, self-contained, trimmed, Release)
 
 | | AutoHttpClient.Generator | Refit 16.1.0 |
 |---|---|---|
-| Build/publish warnings | 3 (see below) | 0 |
-| Published file count | 40 | 50 |
-| Published size | 19.62 MB | 21.14 MB |
-| Cold client construction | ~95 ms | ~98 ms |
+| Build/publish warnings | **0** | 0 |
+| Published file count | 51 | 50 |
+| Published size | 19.96 MB | 21.14 MB |
+| Cold client construction | ~178 ms | ~98 ms |
 
 Construction timing is dominated by .NET self-contained startup/JIT warm-up on this
-machine and is within noise of each other — **do not read a meaningful performance
-difference into that number**. Size and warning count are the more meaningful data
-points here.
+machine and varies run to run (AutoHttpClient's run also resolves a second client via a
+full DI container, which Refit's sample doesn't do) — **do not read a meaningful
+performance difference into that number**. Warning count and size are the more
+meaningful, apples-to-apples data points here.
 
-## The 3 remaining AutoHttpClient warnings
+## How the 0-warning result was achieved
 
-1. `IL2026` on the generated typed-client DI registration
-   (`AddHttpClient<TClient, TImplementation>`), because the generated client still
-   exposes a convenience constructor, `Ctor(HttpClient)`, that falls back to
-   `JsonSerializerOptions.Web` and is explicitly annotated
-   `[RequiresUnreferencedCode]`/`[RequiresDynamicCode]`. `AddHttpClient<TClient,
-   TImplementation>` requires all public constructors of `TImplementation` to be
-   trim-safe as a matter of its own generic constraints, so this warning surfaces
-   at the registration call site even though the DI-friendly 2-argument constructor
-   (`Ctor(HttpClient, JsonSerializerOptions)`) is fully AOT-safe and is what gets
-   selected automatically once a `JsonSerializerOptions` is registered in the
-   container. This is an intentional trade-off: dropping the convenience constructor
-   entirely would make `AddAutoHttpClients()` no longer "just work" out of the box.
-2. and 3. `IL2026`/`IL3050` from the generated response-deserialization call,
-   `HttpContent.ReadFromJsonAsync<T>(HttpContent, JsonSerializerOptions, ...)`. This is
-   the generic (reflection-capable) overload; the fully AOT-safe overload takes a
-   `JsonTypeInfo<T>` instead of a `JsonSerializerOptions`. AutoHttpClient does not yet
-   generate per-method `JsonTypeInfo<T>` resolution the way Refit's generator does when
-   given a `JsonSerializerContext` — **this is a known, tracked gap**, not something this
-   benchmark papers over.
+An earlier pass of this benchmark found 3 residual trim/AOT warnings on the
+AutoHttpClient side. All three are now fixed by generating code that always resolves a
+`JsonTypeInfo<T>` from the supplied `JsonSerializerOptions` (via
+`options.GetTypeInfo(typeof(T))`, which is the documented trim-safe pattern) and calling
+the `JsonTypeInfo<T>`-based overloads instead of the generic
+`JsonSerializerOptions`-based ones:
+
+1. **Response deserialization** now calls
+   `HttpContentJsonExtensions.ReadFromJsonAsync(content, jsonTypeInfo, ct)` instead of
+   the generic `ReadFromJsonAsync<T>(content, jsonSerializerOptions, ct)` overload.
+2. **Request bodies** (`[Body]`/`[Part]`) now call
+   `JsonContent.Create(value, jsonTypeInfo)` instead of
+   `JsonContent.Create(value, options: jsonSerializerOptions)`.
+3. **POST/PUT/PATCH convenience calls** now use the `JsonTypeInfo<T>` overloads of
+   `PostAsJsonAsync`/`PutAsJsonAsync`/`PatchAsJsonAsync`.
+4. **DI registration** (`AddAutoHttpClients(jsonOptions)`) no longer goes through
+   `AddHttpClient<TClient, TImplementation>`, whose generic constraints require *every*
+   public constructor of `TImplementation` to be trim-safe (including the
+   reflection-based convenience constructor). It now uses
+   `AddHttpClient(name).AddTypedClient<TClient>(httpClient => new TImplementation(httpClient, jsonOptions))`,
+   an explicit factory delegate with no such constraint. The parameterless
+   `AddAutoHttpClients()` convenience overload still exists for callers who don't have a
+   `JsonSerializerOptions` handy, and is explicitly annotated
+   `[RequiresUnreferencedCode]`/`[RequiresDynamicCode]` so *that* opt-in path — and only
+   that path — surfaces a warning.
 
 Refit's generated code resolves `JsonTypeInfo<T>` directly from the supplied
 `JsonSerializerContext` at each call site (via `RestService.ForGenerated<T>(client,
-SampleJsonContext.Default)`), which is why its trimmed publish has zero warnings.
-Closing warnings 2–3 above is the next concrete step for full AOT parity and is tracked
-as follow-up work — see the main `README.md` comparison table.
+SampleJsonContext.Default)`), which is the same underlying trim-safe pattern.
 
 ## Reproducing
 

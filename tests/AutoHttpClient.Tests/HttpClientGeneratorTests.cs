@@ -15,10 +15,26 @@ namespace Microsoft.Extensions.DependencyInjection
 {
     public interface IServiceCollection { }
 
+    public interface IHttpClientBuilder
+    {
+        IServiceCollection Services { get; }
+    }
+
+    public sealed class HttpClientBuilder : IHttpClientBuilder
+    {
+        public HttpClientBuilder(IServiceCollection services) => Services = services;
+        public IServiceCollection Services { get; }
+    }
+
     public static class HttpClientFactoryServiceCollectionExtensions
     {
-        public static IServiceCollection AddHttpClient<TClient, TImplementation>(this IServiceCollection services) => services;
-        public static IServiceCollection AddHttpClient<TClient, TImplementation>(this IServiceCollection services, System.Action<global::System.Net.Http.HttpClient> configureClient) => services;
+        public static IHttpClientBuilder AddHttpClient(this IServiceCollection services, string name) => new HttpClientBuilder(services);
+        public static IHttpClientBuilder AddHttpClient(this IServiceCollection services, string name, System.Action<global::System.Net.Http.HttpClient> configureClient) => new HttpClientBuilder(services);
+    }
+
+    public static class HttpClientBuilderExtensions
+    {
+        public static IHttpClientBuilder AddTypedClient<TClient>(this IHttpClientBuilder builder, System.Func<global::System.Net.Http.HttpClient, TClient> factory) where TClient : class => builder;
     }
 }
 ";
@@ -99,19 +115,19 @@ namespace System.Net.Http.Json
 {
     public static class HttpContentJsonExtensions
     {
-        public static global::System.Threading.Tasks.Task<T?> ReadFromJsonAsync<T>(this global::System.Net.Http.HttpContent content, global::System.Text.Json.JsonSerializerOptions? options = null, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(default(T));
+        public static global::System.Threading.Tasks.Task<T?> ReadFromJsonAsync<T>(this global::System.Net.Http.HttpContent content, global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(default(T));
     }
 
     public static class HttpClientJsonExtensions
     {
-        public static global::System.Threading.Tasks.Task<global::System.Net.Http.HttpResponseMessage> PostAsJsonAsync<T>(global::System.Net.Http.HttpClient client, string requestUri, T value, global::System.Text.Json.JsonSerializerOptions? options = null, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new global::System.Net.Http.HttpResponseMessage());
-        public static global::System.Threading.Tasks.Task<global::System.Net.Http.HttpResponseMessage> PutAsJsonAsync<T>(global::System.Net.Http.HttpClient client, string requestUri, T value, global::System.Text.Json.JsonSerializerOptions? options = null, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new global::System.Net.Http.HttpResponseMessage());
-        public static global::System.Threading.Tasks.Task<global::System.Net.Http.HttpResponseMessage> PatchAsJsonAsync<T>(global::System.Net.Http.HttpClient client, string requestUri, T value, global::System.Text.Json.JsonSerializerOptions? options = null, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new global::System.Net.Http.HttpResponseMessage());
+        public static global::System.Threading.Tasks.Task<global::System.Net.Http.HttpResponseMessage> PostAsJsonAsync<T>(global::System.Net.Http.HttpClient client, string requestUri, T value, global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new global::System.Net.Http.HttpResponseMessage());
+        public static global::System.Threading.Tasks.Task<global::System.Net.Http.HttpResponseMessage> PutAsJsonAsync<T>(global::System.Net.Http.HttpClient client, string requestUri, T value, global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new global::System.Net.Http.HttpResponseMessage());
+        public static global::System.Threading.Tasks.Task<global::System.Net.Http.HttpResponseMessage> PatchAsJsonAsync<T>(global::System.Net.Http.HttpClient client, string requestUri, T value, global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new global::System.Net.Http.HttpResponseMessage());
     }
 
     public sealed class JsonContent : global::System.Net.Http.HttpContent
     {
-        public static JsonContent Create<T>(T value, object? mediaType = null, global::System.Text.Json.JsonSerializerOptions? options = null) => new JsonContent();
+        public static JsonContent Create<T>(T value, global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, object? mediaType = null) => new JsonContent();
     }
 }
 ";
@@ -122,7 +138,15 @@ namespace System.Text.Json
     public class JsonSerializerOptions
     {
         public static JsonSerializerOptions Web { get; } = new JsonSerializerOptions();
+        public global::System.Text.Json.Serialization.Metadata.JsonTypeInfo GetTypeInfo(global::System.Type type) => new global::System.Text.Json.Serialization.Metadata.JsonTypeInfo();
     }
+}
+
+namespace System.Text.Json.Serialization.Metadata
+{
+    public class JsonTypeInfo { }
+
+    public class JsonTypeInfo<T> : JsonTypeInfo { }
 }
 ";
 
@@ -262,7 +286,7 @@ public interface IOrdersApi
 }", out _);
 
         var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
-        Assert.Contains("HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, request, _jsonOptions, ct)", source);
+        Assert.Contains("HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, request, (global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<global::CreateOrderRequest>)_jsonOptions.GetTypeInfo(typeof(global::CreateOrderRequest)), ct)", source);
     }
 
     [Fact]
@@ -282,7 +306,11 @@ public interface IOrdersApi
 
         var source = sources["AutoHttpClientRegistrations.g.cs"];
         Assert.Contains("AddAutoHttpClients", source);
-        Assert.Contains("AddHttpClient<global::IOrdersApi, global::OrdersApiClient>(services);", source);
+        Assert.Contains("AddHttpClient(services, \"global::IOrdersApi\")", source);
+        Assert.Contains("AddTypedClient<global::IOrdersApi>(", source);
+        Assert.Contains("new global::OrdersApiClient(httpClient, jsonOptions)", source);
+        Assert.Contains("RequiresUnreferencedCode", source);
+        Assert.Contains("RequiresDynamicCode", source);
     }
 
     [Fact]
@@ -417,7 +445,7 @@ public interface IUploadsApi
         Assert.Contains("__multipart.Add(__part_file, \"file\", \"photo.png\");", source);
         Assert.Contains("new global::System.Net.Http.StringContent(description ?? string.Empty)", source);
         Assert.Contains("__multipart.Add(__part_description, \"description\");", source);
-        Assert.Contains("global::System.Net.Http.Json.JsonContent.Create(metadata, options: _jsonOptions)", source);
+        Assert.Contains("global::System.Net.Http.Json.JsonContent.Create(metadata, (global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<global::Metadata>)_jsonOptions.GetTypeInfo(typeof(global::Metadata)))", source);
         Assert.Contains("__request.Content = __multipart;", source);
     }
 
