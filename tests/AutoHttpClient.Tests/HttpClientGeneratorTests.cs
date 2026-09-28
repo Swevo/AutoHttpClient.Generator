@@ -553,4 +553,87 @@ public interface IOrdersApi
         Assert.Contains("RequiresDynamicCode", source);
         Assert.Contains(": this(httpClient, global::System.Text.Json.JsonSerializerOptions.Web)", source);
     }
+
+    [Fact]
+    public void ObservableReturnType_GeneratesObservableWrapper()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System;
+
+public sealed class OrderDto { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders/{id}"")]
+    IObservable<OrderDto> GetAsync(int id);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("public global::System.IObservable<global::OrderDto> GetAsync(global::System.Int32 id)", source);
+        Assert.Contains("return new global::AutoHttpClient.AutoHttpClientObservable<global::OrderDto>(async __ct =>", source);
+        Assert.Contains("ReadFromJsonAsync", source);
+        Assert.Contains("});", source);
+
+        var attributesSource = sources["AutoHttpClient.Attributes.g.cs"];
+        Assert.Contains("public sealed class AutoHttpClientObservable<T> : IObservable<T>", attributesSource);
+    }
+
+    [Fact]
+    public void JsonSerializerOptionsAttribute_OverridesPerMethodOptions()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderDto { }
+
+public static class CustomJsonOptions
+{
+    public static JsonSerializerOptions Options { get; } = new JsonSerializerOptions();
+}
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders/{id}"")]
+    [JsonSerializerOptions(typeof(CustomJsonOptions), nameof(CustomJsonOptions.Options))]
+    Task<OrderDto> GetAsync(int id, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Id == "AH006");
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("global::CustomJsonOptions.Options.GetTypeInfo(typeof(global::OrderDto))", source);
+    }
+
+    [Fact]
+    public void JsonSerializerOptionsAttribute_InvalidMember_ReportsAH006AndFallsBackToDefault()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderDto { }
+public static class CustomJsonOptions { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders/{id}"")]
+    [JsonSerializerOptions(typeof(CustomJsonOptions), ""DoesNotExist"")]
+    Task<OrderDto> GetAsync(int id, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AH006" && d.Severity == DiagnosticSeverity.Warning);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("_jsonOptions.GetTypeInfo(typeof(global::OrderDto))", source);
+    }
 }

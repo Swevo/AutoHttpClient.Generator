@@ -183,6 +183,59 @@ Part parameter types are handled automatically:
 | `Task<T>` | Sends the request, checks for success, and deserializes JSON with `ReadFromJsonAsync<T>()` |
 | `Task<T?>` | Same as `Task<T>` but preserves nullable result types |
 | `Task<HttpResponseMessage>` | Returns the raw response without any success check |
+| `IObservable<T>` | Wraps the same request/response/deserialize logic in an `IObservable<T>` — see [Observable return types](#observable-return-types) below |
+
+## Observable return types
+
+Methods can also return `IObservable<T>` instead of `Task<T>` for interop with Rx-style code (a single HTTP call surfaced as an observable sequence, matching Refit's `IObservable<T>` support):
+
+```csharp
+using AutoHttpClient;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get("/api/orders/{id}")]
+    IObservable<Order> GetOrderAsync(int id);
+}
+
+// usage
+ordersApi.GetOrderAsync(42).Subscribe(
+    order => Console.WriteLine(order.Id),
+    ex => Console.WriteLine($"Failed: {ex.Message}"));
+```
+
+- The call doesn't start until `Subscribe` is called; disposing the returned subscription cancels the in-flight request.
+- On success, the observer receives exactly one `OnNext` followed by `OnCompleted`. On failure (including a non-success status code, which throws `ApiException`), the observer receives `OnError` instead.
+- No dependency on `System.Reactive` is required — it's a minimal `IObservable<T>`/`IObserver<T>` bridge using only BCL types.
+- A `CancellationToken` parameter isn't meaningful on an `IObservable<T>`-returning method (cancellation is via the subscription's `IDisposable.Dispose()` instead), so don't declare one there.
+
+## Per-method JsonSerializerOptions override
+
+By default every generated method uses the single `JsonSerializerOptions` instance passed to the client's constructor (or registered via `AddAutoHttpClients(jsonOptions)`). Override it for an individual method with `[JsonSerializerOptions(providerType, memberName)]`, pointing at a public static property or field of type `JsonSerializerOptions`:
+
+```csharp
+using AutoHttpClient;
+using System.Text.Json;
+
+public static class LegacyApiJsonOptions
+{
+    public static JsonSerializerOptions Options { get; } = new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = null, // this endpoint still uses PascalCase
+    };
+}
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get("/api/orders/{id}")]
+    [JsonSerializerOptions(typeof(LegacyApiJsonOptions), nameof(LegacyApiJsonOptions.Options))]
+    Task<Order> GetOrderAsync(int id, CancellationToken ct = default);
+}
+```
+
+If the referenced member doesn't exist (or isn't a public static `JsonSerializerOptions` property/field), diagnostic `AH006` is reported and the method falls back to the client-wide options.
 
 ## Error handling
 
@@ -269,6 +322,8 @@ The generated file is a one-time scaffold that you add to your project, then the
 | Typed exception with response body on failure | ✅ (`ApiException`) | ✅ (`ApiException`) | ⚠️ manual |
 | Collection query parameter expansion | ✅ | ✅ | ⚠️ manual |
 | Multipart/form-data uploads | ✅ | ✅ | ⚠️ manual |
+| `IObservable<T>` return types | ✅ | ✅ | ❌ |
+| Per-method JSON serializer override | ✅ (`[JsonSerializerOptions]`) | ⚠️ per-`RefitSettings` instance, not per-method | ❌ |
 
 ## Diagnostics
 
@@ -279,6 +334,7 @@ The generated file is a one-time scaffold that you add to your project, then the
 | `AH003` | Error | Method has multiple `[Body]` parameters; only one is allowed. |
 | `AH004` | Error | Method is marked `[Multipart]` but also has a `[Body]` parameter. |
 | `AH005` | Warning | Parameter is marked `[Part]` but its method is not marked `[Multipart]`. |
+| `AH006` | Warning | `[JsonSerializerOptions]` provider member wasn't found (or isn't a public static `JsonSerializerOptions` property/field) — the client-wide options are used instead. |
 
 ## Generated attributes
 
@@ -378,12 +434,9 @@ builder.Services.AddAutoHttpClients();
 | `[Multipart]` / `[AttachmentName]` | `[Multipart]` / `[Part(name, fileName)]` |
 | `[Authorize]` | Use `[Header("Authorization")]` |
 
-### What Refit supports that AutoHttpClient.Generator doesn't (yet)
+### Feature parity with Refit
 
-- `IObservable<T>` return types
-- Custom `JsonSerializerSettings` per method
-
-For projects using any of these heavily, hold off on migrating until support lands.
+`IObservable<T>` return types and per-method JSON serializer overrides (`[JsonSerializerOptions]`) are both supported — see [Observable return types](#observable-return-types) and [Per-method JsonSerializerOptions override](#per-method-jsonserializeroptions-override) above.
 
 ## Also by the same author
 

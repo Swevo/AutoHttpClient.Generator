@@ -110,6 +110,81 @@ namespace AutoHttpClient
         }
     }
 
+    /// <summary>
+    /// Overrides the client-wide <see cref=""System.Text.Json.JsonSerializerOptions""/> for this method only, pointing at a
+    /// public static property or field of type <see cref=""System.Text.Json.JsonSerializerOptions""/> declared on <paramref name=""providerType""/>.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class JsonSerializerOptionsAttribute : Attribute
+    {
+        public Type ProviderType { get; }
+        public string MemberName { get; }
+        public JsonSerializerOptionsAttribute(Type providerType, string memberName)
+        {
+            ProviderType = providerType;
+            MemberName = memberName;
+        }
+    }
+
+    /// <summary>Bridges a single async HTTP call to an <see cref=""IObservable{T}""/> for methods returning <c>IObservable&lt;T&gt;</c>.</summary>
+    public sealed class AutoHttpClientObservable<T> : IObservable<T>
+    {
+        private readonly global::System.Func<global::System.Threading.CancellationToken, global::System.Threading.Tasks.Task<T>> _factory;
+
+        public AutoHttpClientObservable(global::System.Func<global::System.Threading.CancellationToken, global::System.Threading.Tasks.Task<T>> factory)
+        {
+            _factory = factory;
+        }
+
+        public global::System.IDisposable Subscribe(global::System.IObserver<T> observer)
+        {
+            var cts = new global::System.Threading.CancellationTokenSource();
+            _ = RunAsync(observer, cts.Token);
+            return new Subscription(cts);
+        }
+
+        private async global::System.Threading.Tasks.Task RunAsync(global::System.IObserver<T> observer, global::System.Threading.CancellationToken cancellationToken)
+        {
+            try
+            {
+                var result = await _factory(cancellationToken).ConfigureAwait(false);
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    observer.OnNext(result);
+                    observer.OnCompleted();
+                }
+            }
+            catch (global::System.OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Subscription was disposed before the request completed; this is an expected cancellation, not an error.
+            }
+            catch (global::System.Exception ex)
+            {
+                observer.OnError(ex);
+            }
+        }
+
+        private sealed class Subscription : global::System.IDisposable
+        {
+            private readonly global::System.Threading.CancellationTokenSource _cts;
+            private bool _disposed;
+
+            public Subscription(global::System.Threading.CancellationTokenSource cts) => _cts = cts;
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _cts.Cancel();
+                _cts.Dispose();
+            }
+        }
+    }
+
     /// <summary>Thrown when a generated client receives a non-success HTTP response. Carries the status code, reason phrase, and raw response body.</summary>
     public sealed class ApiException : Exception
     {
@@ -192,6 +267,14 @@ namespace AutoHttpClient
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AH006 = new(
+        id: "AH006",
+        title: "Invalid JsonSerializerOptions provider member",
+        messageFormat: "Method '{0}' on '{1}' specifies [JsonSerializerOptions] provider member '{2}' on type '{3}', but no accessible public static property or field of that name and type JsonSerializerOptions was found — the client-wide JsonSerializerOptions will be used instead",
+        category: "AutoHttpClient",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -234,6 +317,8 @@ namespace AutoHttpClient
         var httpResponseMessageType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Net.Http.HttpResponseMessage");
         var streamType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.IO.Stream");
         var enumerableOfTType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Collections.Generic.IEnumerable`1");
+        var observableOfTType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.IObservable`1");
+        var jsonSerializerOptionsType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Text.Json.JsonSerializerOptions");
 
         foreach (var method in interfaceSymbol.GetMembers().OfType<IMethodSymbol>())
         {
@@ -244,7 +329,7 @@ namespace AutoHttpClient
                 continue;
             }
 
-            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType, enumerableOfTType);
+            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType, enumerableOfTType, observableOfTType, jsonSerializerOptionsType);
             info.Diagnostics.AddRange(methodResult.Diagnostics);
 
             if (methodResult.Method is null)
@@ -270,7 +355,9 @@ namespace AutoHttpClient
         INamedTypeSymbol? cancellationTokenType,
         INamedTypeSymbol? httpResponseMessageType,
         INamedTypeSymbol? streamType,
-        INamedTypeSymbol? enumerableOfTType)
+        INamedTypeSymbol? enumerableOfTType,
+        INamedTypeSymbol? observableOfTType,
+        INamedTypeSymbol? jsonSerializerOptionsType)
     {
         var diagnostics = new List<PendingDiagnostic>();
         var location = method.Locations.FirstOrDefault() ?? Location.None;
@@ -293,10 +380,12 @@ namespace AutoHttpClient
             }
         }
 
-        if (!TryGetReturnInfo(method.ReturnType, httpResponseMessageType, out var returnHandling, out var returnTypeFqn, out var jsonResultTypeFqn, out var jsonResultNullable))
+        if (!TryGetReturnInfo(method.ReturnType, httpResponseMessageType, observableOfTType, out var returnHandling, out var returnTypeFqn, out var jsonResultTypeFqn, out var jsonResultNullable, out var isObservable, out var observableInnerTypeFqn))
         {
             return new MethodAnalysisResult(null, diagnostics);
         }
+
+        var jsonOptionsProviderExpression = ReadJsonOptionsProviderExpression(method, interfaceDisplayName, jsonSerializerOptionsType, location, diagnostics);
 
         var parameters = new List<MethodParameterInfo>();
         var bodyParameters = new List<MethodParameterInfo>();
@@ -399,8 +488,45 @@ namespace AutoHttpClient
                 IsMultipart = isMultipart,
                 Parameters = parameters,
                 Headers = ReadStaticHeaders(method.GetAttributes()),
+                IsObservable = isObservable,
+                ObservableInnerTypeFqn = observableInnerTypeFqn,
+                JsonOptionsProviderExpression = jsonOptionsProviderExpression,
             },
             diagnostics);
+    }
+
+    private static string? ReadJsonOptionsProviderExpression(
+        IMethodSymbol method,
+        string interfaceDisplayName,
+        INamedTypeSymbol? jsonSerializerOptionsType,
+        Location location,
+        List<PendingDiagnostic> diagnostics)
+    {
+        var attribute = method.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == "AutoHttpClient.JsonSerializerOptionsAttribute");
+        if (attribute is null || attribute.ConstructorArguments.Length != 2)
+        {
+            return null;
+        }
+
+        var providerTypeSymbol = attribute.ConstructorArguments[0].Value as ITypeSymbol;
+        var memberName = attribute.ConstructorArguments[1].Value as string;
+
+        if (providerTypeSymbol is not null && !string.IsNullOrEmpty(memberName) && jsonSerializerOptionsType is not null)
+        {
+            var member = providerTypeSymbol.GetMembers(memberName!).FirstOrDefault(m =>
+                m.IsStatic
+                && m.DeclaredAccessibility == Accessibility.Public
+                && ((m is IPropertySymbol prop && SymbolEqualityComparer.Default.Equals(prop.Type, jsonSerializerOptionsType))
+                    || (m is IFieldSymbol field && SymbolEqualityComparer.Default.Equals(field.Type, jsonSerializerOptionsType))));
+
+            if (member is not null)
+            {
+                return ToFullyQualified(providerTypeSymbol) + "." + memberName;
+            }
+        }
+
+        diagnostics.Add(new PendingDiagnostic(AH006, location, method.Name, interfaceDisplayName, memberName ?? "?", providerTypeSymbol?.ToDisplayString() ?? "?"));
+        return null;
     }
 
     private static void Generate(SourceProductionContext context, ImmutableArray<HttpClientInterfaceInfo> interfaces)
@@ -469,8 +595,20 @@ namespace AutoHttpClient
         foreach (var method in info.Methods)
         {
             sb.AppendLine();
-            sb.Append(indent).Append("    public async ").Append(method.ReturnTypeFqn).Append(' ').Append(method.Name).Append('(').Append(BuildParameterList(method.Parameters)).AppendLine(")");
-            sb.Append(indent).AppendLine("    {");
+            var jsonOptionsExpr = method.JsonOptionsProviderExpression ?? "_jsonOptions";
+
+            if (method.IsObservable)
+            {
+                sb.Append(indent).Append("    public ").Append(method.ReturnTypeFqn).Append(' ').Append(method.Name).Append('(').Append(BuildParameterList(method.Parameters)).AppendLine(")");
+                sb.Append(indent).AppendLine("    {");
+                sb.Append(indent).Append("        return new global::AutoHttpClient.AutoHttpClientObservable<").Append(method.ObservableInnerTypeFqn).AppendLine(">(async __ct =>");
+                sb.Append(indent).AppendLine("        {");
+            }
+            else
+            {
+                sb.Append(indent).Append("    public async ").Append(method.ReturnTypeFqn).Append(' ').Append(method.Name).Append('(').Append(BuildParameterList(method.Parameters)).AppendLine(")");
+                sb.Append(indent).AppendLine("    {");
+            }
 
             var routeBindings = method.Parameters
                 .Where(static p => p.Kind == ParameterKind.Route)
@@ -481,7 +619,7 @@ namespace AutoHttpClient
             var headerCollectionParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.HeaderCollection).ToArray();
             var bodyParameter = method.Parameters.FirstOrDefault(static p => p.Kind == ParameterKind.Body);
             var partParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.Part).ToArray();
-            var ctArgument = GetCancellationTokenArgument(method.Parameters);
+            var ctArgument = method.IsObservable ? "__ct" : GetCancellationTokenArgument(method.Parameters);
             var staticHeaders = MergeStaticHeaders(method.Headers, info.Headers);
             var useRequestMessage = headerParameters.Length > 0
                 || headerCollectionParameters.Length > 0
@@ -538,14 +676,14 @@ namespace AutoHttpClient
                     sb.Append(indent).AppendLine("        var __multipart = new global::System.Net.Http.MultipartFormDataContent();");
                     foreach (var parameter in partParameters)
                     {
-                        AppendPartAppendLines(sb, indent + "        ", parameter);
+                        AppendPartAppendLines(sb, indent + "        ", parameter, jsonOptionsExpr);
                     }
 
                     sb.Append(indent).AppendLine("        __request.Content = __multipart;");
                 }
                 else if (bodyParameter is not null)
                 {
-                    sb.Append(indent).Append("        __request.Content = global::System.Net.Http.Json.JsonContent.Create(").Append(bodyParameter.Name).Append(", ").Append(JsonTypeInfoExpression(bodyParameter.TypeFqn)).AppendLine(");");
+                    sb.Append(indent).Append("        __request.Content = global::System.Net.Http.Json.JsonContent.Create(").Append(bodyParameter.Name).Append(", ").Append(JsonTypeInfoExpression(bodyParameter.TypeFqn, jsonOptionsExpr)).AppendLine(");");
                 }
 
                 foreach (var (headerName, headerValue) in staticHeaders)
@@ -596,7 +734,16 @@ namespace AutoHttpClient
             }
 
             AppendReturnHandling(sb, indent, method, ctArgument);
-            sb.Append(indent).AppendLine("    }");
+
+            if (method.IsObservable)
+            {
+                sb.Append(indent).AppendLine("        });");
+                sb.Append(indent).AppendLine("    }");
+            }
+            else
+            {
+                sb.Append(indent).AppendLine("    }");
+            }
         }
 
         sb.Append(indent).AppendLine("}");
@@ -669,6 +816,7 @@ namespace AutoHttpClient
 
     private static void AppendReturnHandling(StringBuilder sb, string indent, HttpMethodInfo method, string ctArgument)
     {
+        var jsonOptionsExpr = method.JsonOptionsProviderExpression ?? "_jsonOptions";
         switch (method.ReturnHandling)
         {
             case ReturnHandlingKind.None:
@@ -683,7 +831,7 @@ namespace AutoHttpClient
                 {
                     sb.Append(indent)
                         .Append("        return await global::System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync(__response.Content, ")
-                        .Append(JsonTypeInfoExpression(method.JsonResultTypeFqn!))
+                        .Append(JsonTypeInfoExpression(method.JsonResultTypeFqn!, jsonOptionsExpr))
                         .Append(", ")
                         .Append(ctArgument)
                         .AppendLine(").ConfigureAwait(false);");
@@ -692,7 +840,7 @@ namespace AutoHttpClient
                 {
                     sb.Append(indent)
                         .Append("        return (await global::System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync(__response.Content, ")
-                        .Append(JsonTypeInfoExpression(method.JsonResultTypeFqn!))
+                        .Append(JsonTypeInfoExpression(method.JsonResultTypeFqn!, jsonOptionsExpr))
                         .Append(", ")
                         .Append(ctArgument)
                         .AppendLine(").ConfigureAwait(false))!;");
@@ -775,10 +923,10 @@ namespace AutoHttpClient
         sb.Append(indent).AppendLine("}");
     }
 
-    private static string JsonTypeInfoExpression(string typeFqn)
-        => $"(global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<{typeFqn}>)_jsonOptions.GetTypeInfo(typeof({typeFqn}))";
+    private static string JsonTypeInfoExpression(string typeFqn, string jsonOptionsExpression = "_jsonOptions")
+        => $"(global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<{typeFqn}>){jsonOptionsExpression}.GetTypeInfo(typeof({typeFqn}))";
 
-    private static void AppendPartAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter)
+    private static void AppendPartAppendLines(StringBuilder sb, string indent, MethodParameterInfo parameter, string jsonOptionsExpression)
     {
         var contentVariable = "__part_" + parameter.Name;
         switch (parameter.PartContentKind)
@@ -793,7 +941,7 @@ namespace AutoHttpClient
                 sb.Append(indent).Append("var ").Append(contentVariable).Append(" = new global::System.Net.Http.StreamContent(").Append(parameter.Name).AppendLine(");");
                 break;
             default:
-                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = global::System.Net.Http.Json.JsonContent.Create(").Append(parameter.Name).Append(", ").Append(JsonTypeInfoExpression(parameter.TypeFqn)).AppendLine(");");
+                sb.Append(indent).Append("var ").Append(contentVariable).Append(" = global::System.Net.Http.Json.JsonContent.Create(").Append(parameter.Name).Append(", ").Append(JsonTypeInfoExpression(parameter.TypeFqn, jsonOptionsExpression)).AppendLine(");");
                 break;
         }
 
@@ -834,13 +982,14 @@ namespace AutoHttpClient
 
     private static string GetDirectCall(HttpMethodInfo method, MethodParameterInfo? bodyParameter, string ctArgument)
     {
+        var jsonOptionsExpr = method.JsonOptionsProviderExpression ?? "_jsonOptions";
         return method.Verb switch
         {
             HttpVerb.Get => $"_httpClient.GetAsync(__url, {ctArgument})",
             HttpVerb.Delete when bodyParameter is null => $"_httpClient.DeleteAsync(__url, {ctArgument})",
-            HttpVerb.Post when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn)}, {ctArgument})",
-            HttpVerb.Put when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PutAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn)}, {ctArgument})",
-            HttpVerb.Patch when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PatchAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn)}, {ctArgument})",
+            HttpVerb.Post when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn, jsonOptionsExpr)}, {ctArgument})",
+            HttpVerb.Put when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PutAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn, jsonOptionsExpr)}, {ctArgument})",
+            HttpVerb.Patch when bodyParameter is not null => $"global::System.Net.Http.Json.HttpClientJsonExtensions.PatchAsJsonAsync(_httpClient, __url, {bodyParameter.Name}, {JsonTypeInfoExpression(bodyParameter.TypeFqn, jsonOptionsExpr)}, {ctArgument})",
             _ => throw new InvalidOperationException("Method requires HttpRequestMessage generation."),
         };
     }
@@ -877,14 +1026,40 @@ namespace AutoHttpClient
     private static bool TryGetReturnInfo(
         ITypeSymbol returnType,
         INamedTypeSymbol? httpResponseMessageType,
+        INamedTypeSymbol? observableOfTType,
         out ReturnHandlingKind returnHandling,
         out string returnTypeFqn,
         out string? jsonResultTypeFqn,
-        out bool jsonResultNullable)
+        out bool jsonResultNullable,
+        out bool isObservable,
+        out string? observableInnerTypeFqn)
     {
         returnTypeFqn = ToFullyQualified(returnType);
         jsonResultTypeFqn = null;
         jsonResultNullable = false;
+        isObservable = false;
+        observableInnerTypeFqn = null;
+
+        if (observableOfTType is not null
+            && returnType is INamedTypeSymbol observableType
+            && observableType.IsGenericType
+            && SymbolEqualityComparer.Default.Equals(observableType.ConstructedFrom, observableOfTType))
+        {
+            isObservable = true;
+            var obsResultType = observableType.TypeArguments[0];
+            observableInnerTypeFqn = ToFullyQualified(obsResultType);
+
+            if (httpResponseMessageType is not null && SymbolEqualityComparer.Default.Equals(obsResultType, httpResponseMessageType))
+            {
+                returnHandling = ReturnHandlingKind.Response;
+                return true;
+            }
+
+            returnHandling = ReturnHandlingKind.Json;
+            jsonResultTypeFqn = observableInnerTypeFqn;
+            jsonResultNullable = IsNullable(obsResultType);
+            return true;
+        }
 
         if (returnType is not INamedTypeSymbol namedType || namedType.Name != "Task" || namedType.ContainingNamespace.ToDisplayString() != "System.Threading.Tasks")
         {
@@ -1277,6 +1452,9 @@ namespace AutoHttpClient
         public IReadOnlyList<MethodParameterInfo> Parameters { get; set; } = Array.Empty<MethodParameterInfo>();
         public List<(string Name, string Value)> Headers { get; set; } = new();
         public bool IsMultipart { get; set; }
+        public bool IsObservable { get; set; }
+        public string? ObservableInnerTypeFqn { get; set; }
+        public string? JsonOptionsProviderExpression { get; set; }
     }
 
     private sealed class MethodParameterInfo
