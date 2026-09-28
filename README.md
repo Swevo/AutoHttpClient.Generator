@@ -184,6 +184,7 @@ Part parameter types are handled automatically:
 | `Task<T?>` | Same as `Task<T>` but preserves nullable result types |
 | `Task<HttpResponseMessage>` | Returns the raw response without any success check |
 | `IObservable<T>` | Wraps the same request/response/deserialize logic in an `IObservable<T>` — see [Observable return types](#observable-return-types) below |
+| `IAsyncEnumerable<T>` | Streams a JSON array response lazily — see [Streaming with IAsyncEnumerable](#streaming-with-iasyncenumerable) below |
 
 ## Observable return types
 
@@ -210,7 +211,59 @@ ordersApi.GetOrderAsync(42).Subscribe(
 - No dependency on `System.Reactive` is required — it's a minimal `IObservable<T>`/`IObserver<T>` bridge using only BCL types.
 - A `CancellationToken` parameter isn't meaningful on an `IObservable<T>`-returning method (cancellation is via the subscription's `IDisposable.Dispose()` instead), so don't declare one there.
 
+## Streaming with IAsyncEnumerable
+
+Methods can return `IAsyncEnumerable<T>` to lazily stream a large JSON array response one element at a time instead of buffering the whole array in memory — something Refit doesn't support:
+
+```csharp
+using AutoHttpClient;
+using System.Collections.Generic;
+using System.Threading;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get("/api/orders")]
+    IAsyncEnumerable<Order> StreamOrdersAsync(CancellationToken ct = default);
+}
+
+// usage
+await foreach (var order in ordersApi.StreamOrdersAsync(ct))
+{
+    Console.WriteLine(order.Id);
+}
+```
+
+- The response and its underlying stream are disposed automatically when enumeration completes or the `await foreach` is exited early (via `break`, an exception, or cancellation).
+- Deserialization uses `System.Text.Json.JsonSerializer.DeserializeAsyncEnumerable<T>`, so elements are yielded as they're parsed instead of waiting for the entire response body.
+- A non-success status code throws `ApiException` before any elements are yielded.
+- Declare an explicit `CancellationToken` parameter (as shown above) to cancel enumeration — `[EnumeratorCancellation]`/`.WithCancellation()` support is intentionally not implemented to keep the generated code simple.
+- `[Retry]` (below) can't be combined with `IAsyncEnumerable<T>` methods (diagnostic `AH007`) because C# iterator methods can't wrap `yield return` in a `try`/`catch`.
+
+## Automatic retry with [Retry]
+
+Decorate a method with `[Retry(maxAttempts, delayMilliseconds)]` to automatically retry on transient failures — no dependency on Polly required:
+
+```csharp
+using AutoHttpClient;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get("/api/orders/{id}")]
+    [Retry(maxAttempts: 5, delayMilliseconds: 100)]
+    Task<Order> GetOrderAsync(int id, CancellationToken ct = default);
+}
+```
+
+- Defaults are `maxAttempts: 3, delayMilliseconds: 200` if omitted.
+- A failure is considered transient (and retried) if it's an `ApiException` with a 5xx, `408`, or `429` status code, or an `HttpRequestException` (e.g. a connection failure). Genuine cancellations (`OperationCanceledException`/`TaskCanceledException`) are never retried.
+- Delay between attempts grows exponentially (attempt 1 waits the base delay, attempt 2 waits 2x, attempt 3 waits 4x, and so on).
+- The entire request (URL/query/header/body construction and the HTTP call) is retried, not just the deserialization step, since a failed `HttpClient.SendAsync` call may not have reached the server at all.
+- Not supported on `IAsyncEnumerable<T>`-returning methods — see [Streaming with IAsyncEnumerable](#streaming-with-iasyncenumerable) above.
+
 ## Per-method JsonSerializerOptions override
+
 
 By default every generated method uses the single `JsonSerializerOptions` instance passed to the client's constructor (or registered via `AddAutoHttpClients(jsonOptions)`). Override it for an individual method with `[JsonSerializerOptions(providerType, memberName)]`, pointing at a public static property or field of type `JsonSerializerOptions`:
 
@@ -324,6 +377,8 @@ The generated file is a one-time scaffold that you add to your project, then the
 | Multipart/form-data uploads | ✅ | ✅ | ⚠️ manual |
 | `IObservable<T>` return types | ✅ | ✅ | ❌ |
 | Per-method JSON serializer override | ✅ (`[JsonSerializerOptions]`) | ⚠️ per-`RefitSettings` instance, not per-method | ❌ |
+| `IAsyncEnumerable<T>` streaming responses | ✅ | ❌ | ❌ |
+| Built-in retry with exponential backoff | ✅ (`[Retry]`, no Polly needed) | ❌ (requires Polly + `HttpClientFactory` handlers) | ❌ |
 
 ## Diagnostics
 
@@ -335,6 +390,7 @@ The generated file is a one-time scaffold that you add to your project, then the
 | `AH004` | Error | Method is marked `[Multipart]` but also has a `[Body]` parameter. |
 | `AH005` | Warning | Parameter is marked `[Part]` but its method is not marked `[Multipart]`. |
 | `AH006` | Warning | `[JsonSerializerOptions]` provider member wasn't found (or isn't a public static `JsonSerializerOptions` property/field) — the client-wide options are used instead. |
+| `AH007` | Warning | `[Retry]` is combined with an `IAsyncEnumerable<T>`-returning method and is ignored, since iterator methods can't wrap `yield return` in a `try`/`catch`. |
 
 ## Generated attributes
 
@@ -434,9 +490,9 @@ builder.Services.AddAutoHttpClients();
 | `[Multipart]` / `[AttachmentName]` | `[Multipart]` / `[Part(name, fileName)]` |
 | `[Authorize]` | Use `[Header("Authorization")]` |
 
-### Feature parity with Refit
+### Feature parity with Refit — and beyond
 
-`IObservable<T>` return types and per-method JSON serializer overrides (`[JsonSerializerOptions]`) are both supported — see [Observable return types](#observable-return-types) and [Per-method JsonSerializerOptions override](#per-method-jsonserializeroptions-override) above.
+`IObservable<T>` return types and per-method JSON serializer overrides (`[JsonSerializerOptions]`) are both supported — see [Observable return types](#observable-return-types) and [Per-method JsonSerializerOptions override](#per-method-jsonserializeroptions-override) above. AutoHttpClient.Generator also goes further than Refit with two built-in differentiators Refit doesn't offer at all: [`IAsyncEnumerable<T>` streaming responses](#streaming-with-iasyncenumerable) and [Polly-free automatic retry](#automatic-retry-with-retry).
 
 ## Also by the same author
 

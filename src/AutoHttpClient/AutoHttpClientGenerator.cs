@@ -126,6 +126,51 @@ namespace AutoHttpClient
         }
     }
 
+    /// <summary>Retries the request with exponential backoff when a transient failure occurs (5xx/408/429 <see cref=""ApiException""/> or an <see cref=""System.Net.Http.HttpRequestException""/>).</summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class RetryAttribute : Attribute
+    {
+        public int MaxAttempts { get; }
+        public int DelayMilliseconds { get; }
+        public RetryAttribute(int maxAttempts = 3, int delayMilliseconds = 200)
+        {
+            MaxAttempts = maxAttempts;
+            DelayMilliseconds = delayMilliseconds;
+        }
+    }
+
+    /// <summary>Internal helper used by generated [Retry]-decorated methods to classify transient failures and compute backoff delays.</summary>
+    public static class AutoHttpClientRetryPolicy
+    {
+        public static bool IsTransient(global::System.Exception ex)
+        {
+            if (ex is ApiException apiEx)
+            {
+                return apiEx.StatusCode >= 500 || apiEx.StatusCode == 408 || apiEx.StatusCode == 429;
+            }
+
+            return ex is global::System.Net.Http.HttpRequestException;
+        }
+
+        public static int GetDelayMilliseconds(int baseDelayMilliseconds, int attempt)
+        {
+            var shift = attempt - 1;
+            if (shift < 0)
+            {
+                shift = 0;
+            }
+
+            if (shift > 20)
+            {
+                shift = 20;
+            }
+
+            var multiplier = 1L << shift;
+            var delay = baseDelayMilliseconds * multiplier;
+            return delay > int.MaxValue ? int.MaxValue : (int)delay;
+        }
+    }
+
     /// <summary>Bridges a single async HTTP call to an <see cref=""IObservable{T}""/> for methods returning <c>IObservable&lt;T&gt;</c>.</summary>
     public sealed class AutoHttpClientObservable<T> : IObservable<T>
     {
@@ -275,6 +320,14 @@ namespace AutoHttpClient
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AH007 = new(
+        id: "AH007",
+        title: "[Retry] is not supported on IAsyncEnumerable<T> streaming methods",
+        messageFormat: "Method '{0}' on '{1}' returns IAsyncEnumerable<T> and cannot be combined with [Retry] because C# iterator methods cannot wrap yield return in a try/catch — the [Retry] attribute will be ignored",
+        category: "AutoHttpClient",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -319,6 +372,7 @@ namespace AutoHttpClient
         var enumerableOfTType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Collections.Generic.IEnumerable`1");
         var observableOfTType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.IObservable`1");
         var jsonSerializerOptionsType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Text.Json.JsonSerializerOptions");
+        var asyncEnumerableOfTType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Collections.Generic.IAsyncEnumerable`1");
 
         foreach (var method in interfaceSymbol.GetMembers().OfType<IMethodSymbol>())
         {
@@ -329,7 +383,7 @@ namespace AutoHttpClient
                 continue;
             }
 
-            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType, enumerableOfTType, observableOfTType, jsonSerializerOptionsType);
+            var methodResult = AnalyzeMethod(method, info.InterfaceDisplayName, cancellationTokenType, httpResponseMessageType, streamType, enumerableOfTType, observableOfTType, jsonSerializerOptionsType, asyncEnumerableOfTType);
             info.Diagnostics.AddRange(methodResult.Diagnostics);
 
             if (methodResult.Method is null)
@@ -357,7 +411,8 @@ namespace AutoHttpClient
         INamedTypeSymbol? streamType,
         INamedTypeSymbol? enumerableOfTType,
         INamedTypeSymbol? observableOfTType,
-        INamedTypeSymbol? jsonSerializerOptionsType)
+        INamedTypeSymbol? jsonSerializerOptionsType,
+        INamedTypeSymbol? asyncEnumerableOfTType)
     {
         var diagnostics = new List<PendingDiagnostic>();
         var location = method.Locations.FirstOrDefault() ?? Location.None;
@@ -380,12 +435,19 @@ namespace AutoHttpClient
             }
         }
 
-        if (!TryGetReturnInfo(method.ReturnType, httpResponseMessageType, observableOfTType, out var returnHandling, out var returnTypeFqn, out var jsonResultTypeFqn, out var jsonResultNullable, out var isObservable, out var observableInnerTypeFqn))
+        if (!TryGetReturnInfo(method.ReturnType, httpResponseMessageType, observableOfTType, asyncEnumerableOfTType, out var returnHandling, out var returnTypeFqn, out var jsonResultTypeFqn, out var jsonResultNullable, out var isObservable, out var observableInnerTypeFqn, out var isStream, out var streamInnerTypeFqn))
         {
             return new MethodAnalysisResult(null, diagnostics);
         }
 
         var jsonOptionsProviderExpression = ReadJsonOptionsProviderExpression(method, interfaceDisplayName, jsonSerializerOptionsType, location, diagnostics);
+        var (retryMaxAttempts, retryDelayMilliseconds) = ReadRetryOptions(method);
+
+        if (isStream && retryMaxAttempts.HasValue)
+        {
+            diagnostics.Add(new PendingDiagnostic(AH007, location, method.Name, interfaceDisplayName));
+            retryMaxAttempts = null;
+        }
 
         var parameters = new List<MethodParameterInfo>();
         var bodyParameters = new List<MethodParameterInfo>();
@@ -491,8 +553,36 @@ namespace AutoHttpClient
                 IsObservable = isObservable,
                 ObservableInnerTypeFqn = observableInnerTypeFqn,
                 JsonOptionsProviderExpression = jsonOptionsProviderExpression,
+                IsStream = isStream,
+                StreamInnerTypeFqn = streamInnerTypeFqn,
+                RetryMaxAttempts = retryMaxAttempts,
+                RetryDelayMilliseconds = retryDelayMilliseconds,
             },
             diagnostics);
+    }
+
+    private static (int? MaxAttempts, int DelayMilliseconds) ReadRetryOptions(IMethodSymbol method)
+    {
+        var attribute = method.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == "AutoHttpClient.RetryAttribute");
+        if (attribute is null)
+        {
+            return (null, 0);
+        }
+
+        var maxAttempts = 3;
+        var delayMilliseconds = 200;
+
+        if (attribute.ConstructorArguments.Length > 0 && attribute.ConstructorArguments[0].Value is int explicitMaxAttempts)
+        {
+            maxAttempts = explicitMaxAttempts;
+        }
+
+        if (attribute.ConstructorArguments.Length > 1 && attribute.ConstructorArguments[1].Value is int explicitDelay)
+        {
+            delayMilliseconds = explicitDelay;
+        }
+
+        return (System.Math.Max(1, maxAttempts), System.Math.Max(0, delayMilliseconds));
     }
 
     private static string? ReadJsonOptionsProviderExpression(
@@ -565,6 +655,11 @@ namespace AutoHttpClient
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoHttpClient.Generator/>");
         sb.AppendLine("#nullable enable");
+        if (info.Methods.Any(static m => m.IsStream))
+        {
+            sb.AppendLine("using System.Threading.Tasks;");
+        }
+
         sb.AppendLine();
 
         if (!string.IsNullOrEmpty(info.Namespace))
@@ -596,8 +691,14 @@ namespace AutoHttpClient
         {
             sb.AppendLine();
             var jsonOptionsExpr = method.JsonOptionsProviderExpression ?? "_jsonOptions";
+            var hasRetry = method.RetryMaxAttempts.HasValue && !method.IsStream;
 
-            if (method.IsObservable)
+            if (method.IsStream)
+            {
+                sb.Append(indent).Append("    public async ").Append(method.ReturnTypeFqn).Append(' ').Append(method.Name).Append('(').Append(BuildParameterList(method.Parameters)).AppendLine(")");
+                sb.Append(indent).AppendLine("    {");
+            }
+            else if (method.IsObservable)
             {
                 sb.Append(indent).Append("    public ").Append(method.ReturnTypeFqn).Append(' ').Append(method.Name).Append('(').Append(BuildParameterList(method.Parameters)).AppendLine(")");
                 sb.Append(indent).AppendLine("    {");
@@ -608,6 +709,16 @@ namespace AutoHttpClient
             {
                 sb.Append(indent).Append("    public async ").Append(method.ReturnTypeFqn).Append(' ').Append(method.Name).Append('(').Append(BuildParameterList(method.Parameters)).AppendLine(")");
                 sb.Append(indent).AppendLine("    {");
+            }
+
+            if (hasRetry)
+            {
+                sb.Append(indent).AppendLine("        var __retryAttempt = 0;");
+                sb.Append(indent).AppendLine("        while (true)");
+                sb.Append(indent).AppendLine("        {");
+                sb.Append(indent).AppendLine("        __retryAttempt++;");
+                sb.Append(indent).AppendLine("        try");
+                sb.Append(indent).AppendLine("        {");
             }
 
             var routeBindings = method.Parameters
@@ -726,14 +837,52 @@ namespace AutoHttpClient
                     }
                 }
 
-                sb.Append(indent).Append("        var __response = await _httpClient.SendAsync(__request, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent).Append("        ").Append(method.IsStream ? "using var" : "var").Append(" __response = await _httpClient.SendAsync(__request, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
             }
             else
             {
-                sb.Append(indent).Append("        var __response = await ").Append(GetDirectCall(method, bodyParameter, ctArgument)).AppendLine(".ConfigureAwait(false);");
+                sb.Append(indent).Append("        ").Append(method.IsStream ? "using var" : "var").Append(" __response = await ").Append(GetDirectCall(method, bodyParameter, ctArgument)).AppendLine(".ConfigureAwait(false);");
             }
 
-            AppendReturnHandling(sb, indent, method, ctArgument);
+            if (method.IsStream)
+            {
+                sb.Append(indent).Append("        await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent).Append("        using var __stream = await __response.Content.ReadAsStreamAsync(").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent)
+                    .Append("        await foreach (var __item in global::System.Text.Json.JsonSerializer.DeserializeAsyncEnumerable(__stream, ")
+                    .Append(JsonTypeInfoExpression(method.StreamInnerTypeFqn!, jsonOptionsExpr))
+                    .Append(", ")
+                    .Append(ctArgument)
+                    .AppendLine(").ConfigureAwait(false))");
+                sb.Append(indent).AppendLine("        {");
+                sb.Append(indent).AppendLine("            if (__item is not null)");
+                sb.Append(indent).AppendLine("            {");
+                sb.Append(indent).AppendLine("                yield return __item;");
+                sb.Append(indent).AppendLine("            }");
+                sb.Append(indent).AppendLine("        }");
+            }
+            else
+            {
+                AppendReturnHandling(sb, indent, method, ctArgument);
+            }
+
+            if (hasRetry)
+            {
+                sb.Append(indent).AppendLine("        }");
+                sb.Append(indent)
+                    .Append("        catch (global::System.Exception __retryEx) when (__retryAttempt < ")
+                    .Append(method.RetryMaxAttempts!.Value)
+                    .AppendLine(" && global::AutoHttpClient.AutoHttpClientRetryPolicy.IsTransient(__retryEx))");
+                sb.Append(indent).AppendLine("        {");
+                sb.Append(indent)
+                    .Append("            await global::System.Threading.Tasks.Task.Delay(global::AutoHttpClient.AutoHttpClientRetryPolicy.GetDelayMilliseconds(")
+                    .Append(method.RetryDelayMilliseconds)
+                    .Append(", __retryAttempt), ")
+                    .Append(ctArgument)
+                    .AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent).AppendLine("        }");
+                sb.Append(indent).AppendLine("        }");
+            }
 
             if (method.IsObservable)
             {
@@ -1027,18 +1176,34 @@ namespace AutoHttpClient
         ITypeSymbol returnType,
         INamedTypeSymbol? httpResponseMessageType,
         INamedTypeSymbol? observableOfTType,
+        INamedTypeSymbol? asyncEnumerableOfTType,
         out ReturnHandlingKind returnHandling,
         out string returnTypeFqn,
         out string? jsonResultTypeFqn,
         out bool jsonResultNullable,
         out bool isObservable,
-        out string? observableInnerTypeFqn)
+        out string? observableInnerTypeFqn,
+        out bool isStream,
+        out string? streamInnerTypeFqn)
     {
         returnTypeFqn = ToFullyQualified(returnType);
         jsonResultTypeFqn = null;
         jsonResultNullable = false;
         isObservable = false;
         observableInnerTypeFqn = null;
+        isStream = false;
+        streamInnerTypeFqn = null;
+
+        if (asyncEnumerableOfTType is not null
+            && returnType is INamedTypeSymbol asyncEnumerableType
+            && asyncEnumerableType.IsGenericType
+            && SymbolEqualityComparer.Default.Equals(asyncEnumerableType.ConstructedFrom, asyncEnumerableOfTType))
+        {
+            isStream = true;
+            streamInnerTypeFqn = ToFullyQualified(asyncEnumerableType.TypeArguments[0]);
+            returnHandling = ReturnHandlingKind.Streaming;
+            return true;
+        }
 
         if (observableOfTType is not null
             && returnType is INamedTypeSymbol observableType
@@ -1455,6 +1620,10 @@ namespace AutoHttpClient
         public bool IsObservable { get; set; }
         public string? ObservableInnerTypeFqn { get; set; }
         public string? JsonOptionsProviderExpression { get; set; }
+        public bool IsStream { get; set; }
+        public string? StreamInnerTypeFqn { get; set; }
+        public int? RetryMaxAttempts { get; set; }
+        public int RetryDelayMilliseconds { get; set; }
     }
 
     private sealed class MethodParameterInfo
@@ -1506,5 +1675,6 @@ namespace AutoHttpClient
         None,
         Json,
         Response,
+        Streaming,
     }
 }

@@ -50,19 +50,23 @@ namespace System.Net.Http
         public global::System.Threading.Tasks.Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(new HttpResponseMessage());
     }
 
-    public class HttpResponseMessage
+    public class HttpResponseMessage : global::System.IDisposable
     {
         public HttpContent Content { get; set; } = new HttpContent();
         public bool IsSuccessStatusCode { get; set; } = true;
         public int StatusCode { get; set; } = 200;
         public string? ReasonPhrase { get; set; } = ""OK"";
         public void EnsureSuccessStatusCode() { }
+        public void Dispose() { }
     }
 
-    public class HttpContent
+    public class HttpContent : global::System.IDisposable
     {
         public global::System.Threading.Tasks.Task<string> ReadAsStringAsync(global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult(string.Empty);
+        public global::System.Threading.Tasks.Task<global::System.IO.Stream> ReadAsStreamAsync(global::System.Threading.CancellationToken cancellationToken = default) => global::System.Threading.Tasks.Task.FromResult<global::System.IO.Stream>(new global::System.IO.MemoryStream());
+        public void Dispose() { }
     }
+
 
     public class HttpRequestMessage : global::System.IDisposable
     {
@@ -70,6 +74,12 @@ namespace System.Net.Http
         public HttpContent? Content { get; set; }
         public HttpHeaders Headers { get; } = new HttpHeaders();
         public void Dispose() { }
+    }
+
+    public class HttpRequestException : global::System.Exception
+    {
+        public HttpRequestException() { }
+        public HttpRequestException(string message) : base(message) { }
     }
 
     public class HttpHeaders
@@ -139,6 +149,15 @@ namespace System.Text.Json
     {
         public static JsonSerializerOptions Web { get; } = new JsonSerializerOptions();
         public global::System.Text.Json.Serialization.Metadata.JsonTypeInfo GetTypeInfo(global::System.Type type) => new global::System.Text.Json.Serialization.Metadata.JsonTypeInfo();
+    }
+
+    public static class JsonSerializer
+    {
+        public static async global::System.Collections.Generic.IAsyncEnumerable<T?> DeserializeAsyncEnumerable<T>(global::System.IO.Stream utf8Json, global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, global::System.Threading.CancellationToken cancellationToken = default)
+        {
+            await global::System.Threading.Tasks.Task.CompletedTask;
+            yield break;
+        }
     }
 }
 
@@ -635,5 +654,87 @@ public interface IOrdersApi
 
         var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
         Assert.Contains("_jsonOptions.GetTypeInfo(typeof(global::OrderDto))", source);
+    }
+
+    [Fact]
+    public void RetryAttribute_WrapsBodyInRetryLoop()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderDto { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders/{id}"")]
+    [Retry(5, 100)]
+    Task<OrderDto> GetAsync(int id, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("while (true)", source);
+        Assert.Contains("__retryAttempt++;", source);
+        Assert.Contains("catch (global::System.Exception __retryEx) when (__retryAttempt < 5 && global::AutoHttpClient.AutoHttpClientRetryPolicy.IsTransient(__retryEx))", source);
+        Assert.Contains("AutoHttpClientRetryPolicy.GetDelayMilliseconds(100, __retryAttempt)", source);
+
+        var attributesSource = sources["AutoHttpClient.Attributes.g.cs"];
+        Assert.Contains("public sealed class RetryAttribute : Attribute", attributesSource);
+        Assert.Contains("public static class AutoHttpClientRetryPolicy", attributesSource);
+    }
+
+    [Fact]
+    public void AsyncEnumerableReturnType_GeneratesStreamingIterator()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class OrderDto { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    IAsyncEnumerable<OrderDto> StreamAsync(CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("public async global::System.Collections.Generic.IAsyncEnumerable<global::OrderDto> StreamAsync(global::System.Threading.CancellationToken ct = default)", source);
+        Assert.Contains("using var __response = await", source);
+        Assert.Contains("using var __stream = await __response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);", source);
+        Assert.Contains("await foreach (var __item in global::System.Text.Json.JsonSerializer.DeserializeAsyncEnumerable(__stream,", source);
+        Assert.Contains("yield return __item;", source);
+    }
+
+    [Fact]
+    public void AH007_RetryOnStreamingMethod_DiagnosticReportedAndRetryIgnored()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class OrderDto { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders"")]
+    [Retry]
+    IAsyncEnumerable<OrderDto> StreamAsync(CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AH007" && d.Severity == DiagnosticSeverity.Warning);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.DoesNotContain("while (true)", source);
     }
 }
