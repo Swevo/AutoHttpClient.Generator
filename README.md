@@ -8,6 +8,12 @@
 
 AutoHttpClient.Generator is an **AOT-safe, compile-time typed HTTP client** for .NET. Annotate an interface with `[HttpClient]`, decorate methods with `[Get]`, `[Post]`, `[Put]`, `[Delete]`, or `[Patch]`, and the generator emits a strongly-typed implementation plus DI registration at build time.
 
+## Related Swevo packages
+
+- [`AutoDispatch.Generator`](https://www.nuget.org/packages/AutoDispatch.Generator) — compile-time MediatR-style dispatch
+- [`AutoMap.Generator`](https://www.nuget.org/packages/AutoMap.Generator) — compile-time DTO/entity mapping
+- [`Swevo.AutoAssert`](https://www.nuget.org/packages/Swevo.AutoAssert) — fluent assertions without commercial licensing
+
 ## Why AutoHttpClient.Generator?
 
 - **Compile-time generated clients** — no dynamic proxy generation, no reflection-heavy dispatch layer
