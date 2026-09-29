@@ -305,7 +305,7 @@ public interface IOrdersApi
 }", out _);
 
         var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
-        Assert.Contains("HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, request, (global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<global::CreateOrderRequest>)_jsonOptions.GetTypeInfo(typeof(global::CreateOrderRequest)), ct)", source);
+        Assert.Contains("HttpClientJsonExtensions.PostAsJsonAsync(_httpClient, __url, request, (global::System.Text.Json.Serialization.Metadata.JsonTypeInfo<global::CreateOrderRequest>)_jsonOptions.GetTypeInfo(typeof(global::CreateOrderRequest)), __effectiveCt)", source);
     }
 
     [Fact]
@@ -544,7 +544,7 @@ public interface IOrdersApi
 }", out _);
 
         var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
-        Assert.Contains("await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ct).ConfigureAwait(false);", source);
+        Assert.Contains("await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, __effectiveCt).ConfigureAwait(false);", source);
 
         var attributesSource = sources["AutoHttpClient.Attributes.g.cs"];
         Assert.Contains("public sealed class ApiException : Exception", attributesSource);
@@ -688,6 +688,60 @@ public interface IOrdersApi
     }
 
     [Fact]
+    public void ResilienceAttribute_AppliesPresetRetryAndTimeout()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderDto { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders/{id}"")]
+    [Resilience(ResiliencePreset.Aggressive)]
+    Task<OrderDto> GetAsync(int id, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("using var __timeoutCts = new global::System.Threading.CancellationTokenSource(60000);", source);
+        Assert.Contains("while (true)", source);
+        Assert.Contains("__retryAttempt < 5", source);
+        Assert.Contains("AutoHttpClientRetryPolicy.GetDelayMilliseconds(100, __retryAttempt)", source);
+    }
+
+    [Fact]
+    public void RetryAttribute_OverridesResilienceRetryButKeepsTimeout()
+    {
+        var sources = RunGenerator(@"
+using AutoHttpClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderDto { }
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get(""/api/orders/{id}"")]
+    [Resilience(ResiliencePreset.Conservative)]
+    [Retry(7, 42)]
+    Task<OrderDto> GetAsync(int id, CancellationToken ct = default);
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
+        Assert.Contains("using var __timeoutCts = new global::System.Threading.CancellationTokenSource(15000);", source);
+        Assert.Contains("__retryAttempt < 7", source);
+        Assert.Contains("AutoHttpClientRetryPolicy.GetDelayMilliseconds(42, __retryAttempt)", source);
+    }
+
+    [Fact]
     public void AsyncEnumerableReturnType_GeneratesStreamingIterator()
     {
         var sources = RunGenerator(@"
@@ -709,7 +763,7 @@ public interface IOrdersApi
         var source = sources["IOrdersApi.AutoHttpClient.g.cs"];
         Assert.Contains("public async global::System.Collections.Generic.IAsyncEnumerable<global::OrderDto> StreamAsync(global::System.Threading.CancellationToken ct = default)", source);
         Assert.Contains("using var __response = await", source);
-        Assert.Contains("using var __stream = await __response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);", source);
+        Assert.Contains("using var __stream = await __response.Content.ReadAsStreamAsync(__effectiveCt).ConfigureAwait(false);", source);
         Assert.Contains("await foreach (var __item in global::System.Text.Json.JsonSerializer.DeserializeAsyncEnumerable(__stream,", source);
         Assert.Contains("yield return __item;", source);
     }

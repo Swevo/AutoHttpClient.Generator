@@ -139,6 +139,29 @@ namespace AutoHttpClient
         }
     }
 
+    /// <summary>Built-in resilience presets for retry + timeout policy on a method.</summary>
+    public enum ResiliencePreset
+    {
+        Conservative = 0,
+        Standard = 1,
+        Aggressive = 2
+    }
+
+    /// <summary>
+    /// Applies a built-in resilience preset to a method. Presets define retry and timeout values:
+    /// Conservative (2 attempts, 500ms base delay, 15s timeout), Standard (3, 200ms, 30s),
+    /// Aggressive (5, 100ms, 60s). Explicit [Retry] still overrides the retry part.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class ResilienceAttribute : Attribute
+    {
+        public ResiliencePreset Preset { get; }
+        public ResilienceAttribute(ResiliencePreset preset = ResiliencePreset.Standard)
+        {
+            Preset = preset;
+        }
+    }
+
     /// <summary>Internal helper used by generated [Retry]-decorated methods to classify transient failures and compute backoff delays.</summary>
     public static class AutoHttpClientRetryPolicy
     {
@@ -441,7 +464,14 @@ namespace AutoHttpClient
         }
 
         var jsonOptionsProviderExpression = ReadJsonOptionsProviderExpression(method, interfaceDisplayName, jsonSerializerOptionsType, location, diagnostics);
+        var resilience = ReadResilienceOptions(method);
         var (retryMaxAttempts, retryDelayMilliseconds) = ReadRetryOptions(method);
+        if (!retryMaxAttempts.HasValue && resilience is not null)
+        {
+            retryMaxAttempts = resilience.MaxAttempts;
+            retryDelayMilliseconds = resilience.DelayMilliseconds;
+        }
+        var timeoutMilliseconds = resilience?.TimeoutMilliseconds;
 
         if (isStream && retryMaxAttempts.HasValue)
         {
@@ -557,8 +587,38 @@ namespace AutoHttpClient
                 StreamInnerTypeFqn = streamInnerTypeFqn,
                 RetryMaxAttempts = retryMaxAttempts,
                 RetryDelayMilliseconds = retryDelayMilliseconds,
+                TimeoutMilliseconds = timeoutMilliseconds,
             },
             diagnostics);
+    }
+
+    private sealed class ResilienceOptions
+    {
+        public int MaxAttempts { get; set; }
+        public int DelayMilliseconds { get; set; }
+        public int TimeoutMilliseconds { get; set; }
+    }
+
+    private static ResilienceOptions? ReadResilienceOptions(IMethodSymbol method)
+    {
+        var attribute = method.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == "AutoHttpClient.ResilienceAttribute");
+        if (attribute is null)
+        {
+            return null;
+        }
+
+        var preset = 1; // Standard
+        if (attribute.ConstructorArguments.Length > 0 && attribute.ConstructorArguments[0].Value is int explicitPreset)
+        {
+            preset = explicitPreset;
+        }
+
+        return preset switch
+        {
+            0 => new ResilienceOptions { MaxAttempts = 2, DelayMilliseconds = 500, TimeoutMilliseconds = 15_000 }, // Conservative
+            2 => new ResilienceOptions { MaxAttempts = 5, DelayMilliseconds = 100, TimeoutMilliseconds = 60_000 }, // Aggressive
+            _ => new ResilienceOptions { MaxAttempts = 3, DelayMilliseconds = 200, TimeoutMilliseconds = 30_000 }, // Standard
+        };
     }
 
     private static (int? MaxAttempts, int DelayMilliseconds) ReadRetryOptions(IMethodSymbol method)
@@ -731,12 +791,22 @@ namespace AutoHttpClient
             var bodyParameter = method.Parameters.FirstOrDefault(static p => p.Kind == ParameterKind.Body);
             var partParameters = method.Parameters.Where(static p => p.Kind == ParameterKind.Part).ToArray();
             var ctArgument = method.IsObservable ? "__ct" : GetCancellationTokenArgument(method.Parameters);
+            const string effectiveCtArgument = "__effectiveCt";
             var staticHeaders = MergeStaticHeaders(method.Headers, info.Headers);
             var useRequestMessage = headerParameters.Length > 0
                 || headerCollectionParameters.Length > 0
                 || staticHeaders.Count > 0
                 || method.IsMultipart
                 || RequiresRequestMessage(method.Verb, bodyParameter is not null);
+
+            sb.Append(indent).Append("        var __effectiveCt = ").Append(ctArgument).AppendLine(";");
+
+            if (method.TimeoutMilliseconds.HasValue)
+            {
+                sb.Append(indent).Append("        using var __timeoutCts = new global::System.Threading.CancellationTokenSource(").Append(method.TimeoutMilliseconds.Value).AppendLine(");");
+                sb.Append(indent).Append("        using var __linkedCts = global::System.Threading.CancellationTokenSource.CreateLinkedTokenSource(").Append(ctArgument).AppendLine(", __timeoutCts.Token);");
+                sb.Append(indent).AppendLine("        __effectiveCt = __linkedCts.Token;");
+            }
 
             sb.Append(indent).Append("        var __url = ").Append(ToInterpolatedUrlLiteral(method.Template, routeBindings)).AppendLine(";");
 
@@ -837,22 +907,22 @@ namespace AutoHttpClient
                     }
                 }
 
-                sb.Append(indent).Append("        ").Append(method.IsStream ? "using var" : "var").Append(" __response = await _httpClient.SendAsync(__request, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent).Append("        ").Append(method.IsStream ? "using var" : "var").Append(" __response = await _httpClient.SendAsync(__request, ").Append(effectiveCtArgument).AppendLine(").ConfigureAwait(false);");
             }
             else
             {
-                sb.Append(indent).Append("        ").Append(method.IsStream ? "using var" : "var").Append(" __response = await ").Append(GetDirectCall(method, bodyParameter, ctArgument)).AppendLine(".ConfigureAwait(false);");
+                sb.Append(indent).Append("        ").Append(method.IsStream ? "using var" : "var").Append(" __response = await ").Append(GetDirectCall(method, bodyParameter, effectiveCtArgument)).AppendLine(".ConfigureAwait(false);");
             }
 
             if (method.IsStream)
             {
-                sb.Append(indent).Append("        await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
-                sb.Append(indent).Append("        using var __stream = await __response.Content.ReadAsStreamAsync(").Append(ctArgument).AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent).Append("        await global::AutoHttpClient.AutoHttpClientResponseExtensions.EnsureSuccessAsync(__response, ").Append(effectiveCtArgument).AppendLine(").ConfigureAwait(false);");
+                sb.Append(indent).Append("        using var __stream = await __response.Content.ReadAsStreamAsync(").Append(effectiveCtArgument).AppendLine(").ConfigureAwait(false);");
                 sb.Append(indent)
                     .Append("        await foreach (var __item in global::System.Text.Json.JsonSerializer.DeserializeAsyncEnumerable(__stream, ")
                     .Append(JsonTypeInfoExpression(method.StreamInnerTypeFqn!, jsonOptionsExpr))
                     .Append(", ")
-                    .Append(ctArgument)
+                    .Append(effectiveCtArgument)
                     .AppendLine(").ConfigureAwait(false))");
                 sb.Append(indent).AppendLine("        {");
                 sb.Append(indent).AppendLine("            if (__item is not null)");
@@ -863,7 +933,7 @@ namespace AutoHttpClient
             }
             else
             {
-                AppendReturnHandling(sb, indent, method, ctArgument);
+                AppendReturnHandling(sb, indent, method, effectiveCtArgument);
             }
 
             if (hasRetry)
@@ -1624,6 +1694,7 @@ namespace AutoHttpClient
         public string? StreamInnerTypeFqn { get; set; }
         public int? RetryMaxAttempts { get; set; }
         public int RetryDelayMilliseconds { get; set; }
+        public int? TimeoutMilliseconds { get; set; }
     }
 
     private sealed class MethodParameterInfo

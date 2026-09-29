@@ -246,6 +246,28 @@ await foreach (var order in ordersApi.StreamOrdersAsync(ct))
 - Declare an explicit `CancellationToken` parameter (as shown above) to cancel enumeration — `[EnumeratorCancellation]`/`.WithCancellation()` support is intentionally not implemented to keep the generated code simple.
 - `[Retry]` (below) can't be combined with `IAsyncEnumerable<T>` methods (diagnostic `AH007`) because C# iterator methods can't wrap `yield return` in a `try`/`catch`.
 
+## Resilience presets with [Resilience]
+
+For a one-attribute resilience policy, use `[Resilience]` on a method. It applies timeout + retry defaults together:
+
+- `Conservative` → 2 attempts, 500ms base delay, 15s timeout
+- `Standard` (default) → 3 attempts, 200ms base delay, 30s timeout
+- `Aggressive` → 5 attempts, 100ms base delay, 60s timeout
+
+```csharp
+using AutoHttpClient;
+
+[HttpClient]
+public interface IOrdersApi
+{
+    [Get("/api/orders/{id}")]
+    [Resilience(ResiliencePreset.Aggressive)]
+    Task<Order> GetOrderAsync(int id, CancellationToken ct = default);
+}
+```
+
+`[Resilience]` is method-level, so different endpoints can use different policies. If both `[Resilience]` and `[Retry]` are applied, explicit `[Retry]` values win for retry attempts/delay, while timeout still comes from the selected resilience preset.
+
 ## Automatic retry with [Retry]
 
 Decorate a method with `[Retry(maxAttempts, delayMilliseconds)]` to automatically retry on transient failures — no dependency on Polly required:
@@ -384,6 +406,7 @@ The generated file is a one-time scaffold that you add to your project, then the
 | `IObservable<T>` return types | ✅ | ✅ | ❌ |
 | Per-method JSON serializer override | ✅ (`[JsonSerializerOptions]`) | ⚠️ per-`RefitSettings` instance, not per-method | ❌ |
 | `IAsyncEnumerable<T>` streaming responses | ✅ | ❌ | ❌ |
+| Per-endpoint resilience presets | ✅ (`[Resilience(Conservative/Standard/Aggressive)]`) | ❌ | ❌ |
 | Built-in retry with exponential backoff | ✅ (`[Retry]`, no Polly needed) | ❌ (requires Polly + `HttpClientFactory` handlers) | ❌ |
 
 ## Diagnostics
@@ -498,7 +521,7 @@ builder.Services.AddAutoHttpClients();
 
 ### Feature parity with Refit — and beyond
 
-`IObservable<T>` return types and per-method JSON serializer overrides (`[JsonSerializerOptions]`) are both supported — see [Observable return types](#observable-return-types) and [Per-method JsonSerializerOptions override](#per-method-jsonserializeroptions-override) above. AutoHttpClient.Generator also goes further than Refit with two built-in differentiators Refit doesn't offer at all: [`IAsyncEnumerable<T>` streaming responses](#streaming-with-iasyncenumerable) and [Polly-free automatic retry](#automatic-retry-with-retry).
+`IObservable<T>` return types and per-method JSON serializer overrides (`[JsonSerializerOptions]`) are both supported — see [Observable return types](#observable-return-types) and [Per-method JsonSerializerOptions override](#per-method-jsonserializeroptions-override) above. AutoHttpClient.Generator also goes further than Refit with three built-in differentiators Refit doesn't offer at all: [`IAsyncEnumerable<T>` streaming responses](#streaming-with-iasyncenumerable), [Polly-free automatic retry](#automatic-retry-with-retry), and [per-endpoint resilience presets](#resilience-presets-with-resilience).
 
 ## Also by the same author
 
